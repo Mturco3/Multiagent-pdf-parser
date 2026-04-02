@@ -1,0 +1,15 @@
+# Core dependencies
+pymupdf
+pdfplumber
+pdf2image
+camelot-py[cv]
+nltk
+Pillow
+markdown
+langchain
+openai
+crewai
+groq
+flask
+python-dotenv
+werkzeug
