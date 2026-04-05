@@ -26,21 +26,39 @@ This project is an agent-based system that processes PDF files (such as lecture 
 ## Setup
 1. Create and activate a virtual environment:
    ```sh
-   python -m venv .venv
-   source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+   python -m venv pdf_parser
+   pdf_parser\Scripts\activate  # On Windows
    ```
 2. Install dependencies:
    ```sh
    pip install -r requirements.txt
    ```
+3. Create a `.env` file with your API keys:
+   ```
+   GROQ_API_KEY=your_groq_api_key
+   GOOGLE_API_KEY=your_google_api_key
+   ```
 
 ## Usage
-1. Place your PDF file in the project directory.
-2. Run the orchestrator script (to be implemented).
-3. The output Markdown file will be generated and ready for import into Obsidian.
+
+**Option 1 — using `config.yaml`:**
+
+Create a `config.yaml` in the project root:
+```yaml
+input_pdf: 'path/to/your/slides.pdf'
+output_dir: 'path/to/output/directory'
+```
+Then run:
+```sh
+python main.py
+```
+
+**Option 2 — passing paths directly:**
+```sh
+python main.py path/to/slides.pdf path/to/output.md
+```
+
+The output Markdown file will be generated and ready for import into Obsidian.
 
 ## Customization
 - You can extend or modify agents for additional processing (e.g., citation extraction, advanced diagram parsing, etc.).
-
-## License
-MIT
