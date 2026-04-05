@@ -10,6 +10,7 @@ class ContentCheckerAgent:
         self.stopwords = set(stopwords.words('english'))
 
     def check(self, markdown_text, structure=None):
+        print(f"\n[ContentChecker] Checking content completeness...")
         doc = fitz.open(self.pdf_path)
         pdf_words = set()
         pdf_concepts = set()
@@ -28,16 +29,17 @@ class ContentCheckerAgent:
         # Word coverage
         missing = pdf_words - md_words
         if missing:
-            print(f"Warning: Missing words in Markdown: {sorted(list(missing))[:20]} ...")
+            print(f"[ContentChecker] [WARN] Missing words: {sorted(list(missing))[:20]} ...")
         else:
-            print("All content words are present in the Markdown.")
+            print("[ContentChecker] [OK] All content words present in Markdown")
         # Concept coverage
         missing_concepts = pdf_concepts - md_concepts
         if missing_concepts:
-            print(f"Warning: Missing concepts in Markdown: {sorted(list(missing_concepts))[:10]} ...")
+            print(f"[ContentChecker] [WARN] Missing concepts: {sorted(list(missing_concepts))[:10]} ...")
         else:
-            print("All key concepts are present in the Markdown.")
+            print("[ContentChecker] [OK] All key concepts present in Markdown")
         # Hallucination check (simple): flag words in markdown not in PDF
         hallucinated = md_words - pdf_words
         if hallucinated:
-            print(f"Potential hallucinated words in Markdown: {sorted(list(hallucinated))[:10]} ...")
+            print(f"[ContentChecker] [WARN] Potential hallucinated words: {sorted(list(hallucinated))[:10]} ...")
+        print(f"[ContentChecker] [OK] Content check complete")

@@ -3,7 +3,7 @@ import requests
 class ImageCaptionerAgent:
     def __init__(self, api_keys):
         self.api_keys = api_keys
-        self.model = "llama3-70b-8192"  # Example Groq model
+        self.model = "gemma-4-31b-it"
         self.api_url = "https://api.groq.com/openai/v1/chat/completions"
         self.api_key = api_keys.get("GROQ") or api_keys.get("GOOGLE")
 
