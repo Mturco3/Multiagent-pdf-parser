@@ -21,3 +21,7 @@ Thumbs.db
 
 # Obsidian
 .obsidian/
+
+# User-specific config and outputs
+config.yaml
+Outputs/
