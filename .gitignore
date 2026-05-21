@@ -25,3 +25,4 @@ Thumbs.db
 # User-specific config and outputs
 config.yaml
 Outputs/
+cache/

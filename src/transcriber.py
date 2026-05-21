@@ -1,0 +1,36 @@
+import os
+import fitz  # PyMuPDF
+
+CACHE_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "cache")
+
+
+class Transcriber:
+    def __init__(self, pdf_path):
+        self.pdf_path = pdf_path
+
+    def run(self):
+        pdf_name = os.path.splitext(os.path.basename(self.pdf_path))[0]
+        out_dir = os.path.join(CACHE_DIR, pdf_name)
+        os.makedirs(out_dir, exist_ok=True)
+
+        print("=" * 60)
+        print("  PDF Transcriber")
+        print(f"  Input : {self.pdf_path}")
+        print(f"  Cache : {out_dir}")
+        print("=" * 60)
+
+        doc = fitz.open(self.pdf_path)
+        total = len(doc)
+
+        for i, page in enumerate(doc):
+            slide_num = i + 1
+            text = page.get_text().strip()
+            out_path = os.path.join(out_dir, f"slide_{slide_num:03d}.txt")
+            with open(out_path, "w", encoding="utf-8") as f:
+                f.write(text)
+            print(f"[{slide_num}/{total}] -> {os.path.basename(out_path)}")
+
+        doc.close()
+        print("=" * 60)
+        print(f"  [OK] {total} slides written to cache/{pdf_name}/")
+        print("=" * 60)
