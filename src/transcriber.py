@@ -5,6 +5,9 @@ CACHE_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "cache")
 
 
 class Transcriber:
+    """Transcriber is responsible for extracting text from PDF slides and saving them as text files in a cache directory.
+    Each slide's text is saved in a separate file named 'slide_XXX.txt' where XXX is the slide number with leading zeros.
+    """
     def __init__(self, pdf_path):
         self.pdf_path = pdf_path
 
@@ -14,9 +17,9 @@ class Transcriber:
         os.makedirs(out_dir, exist_ok=True)
 
         print("=" * 60)
-        print("  PDF Transcriber")
-        print(f"  Input : {self.pdf_path}")
-        print(f"  Cache : {out_dir}")
+        print("PDF Transcriber")
+        print(f"Input : {self.pdf_path}")
+        print(f"Cache : {out_dir}")
         print("=" * 60)
 
         doc = fitz.open(self.pdf_path)
@@ -32,5 +35,5 @@ class Transcriber:
 
         doc.close()
         print("=" * 60)
-        print(f"  [OK] {total} slides written to cache/{pdf_name}/")
+        print(f"[OK] {total} slides written to cache/{pdf_name}/")
         print("=" * 60)
