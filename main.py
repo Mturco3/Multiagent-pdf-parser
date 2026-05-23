@@ -1,7 +1,9 @@
-import os
 import sys
 import yaml
-from src.transcriber import Transcriber
+from dotenv import load_dotenv
+from src.pipeline import Pipeline
+
+load_dotenv()
 
 if len(sys.argv) == 2:
     pdf_path = sys.argv[1]
@@ -10,4 +12,4 @@ else:
         config = yaml.safe_load(f)
     pdf_path = config["input_pdf"]
 
-Transcriber(pdf_path).run()
+Pipeline(pdf_path).run()

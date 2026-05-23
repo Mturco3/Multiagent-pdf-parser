@@ -11,9 +11,9 @@ class Transcriber:
     def __init__(self, pdf_path):
         self.pdf_path = pdf_path
 
-    def run(self):
+    def run(self) -> str:
         pdf_name = os.path.splitext(os.path.basename(self.pdf_path))[0]
-        out_dir = os.path.join(CACHE_DIR, pdf_name)
+        out_dir = os.path.join(CACHE_DIR, pdf_name, "transcriptions")
         os.makedirs(out_dir, exist_ok=True)
 
         print("=" * 60)
@@ -35,5 +35,6 @@ class Transcriber:
 
         doc.close()
         print("=" * 60)
-        print(f"[OK] {total} slides written to cache/{pdf_name}/")
+        print(f"[OK] {total} slides written to cache/{pdf_name}/transcriptions/")
         print("=" * 60)
+        return out_dir
