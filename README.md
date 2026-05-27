@@ -1,64 +1,77 @@
 # University Notes Transcript Agent
 
-This project is an agent-based system that processes PDF files (such as lecture notes or academic papers) and generates clean, Obsidian-ready Markdown notes. It uses multiple specialized agents coordinated by an orchestrator, leveraging Groq for LLM-powered tasks.
+Converts PDF lecture slides into polished, readable university notes as a single Markdown document. Uses a multi-step LLM pipeline powered by Pydantic AI and Google Gemini.
 
-## Features
-- **Text Extractor Agent:** Extracts text from PDF files.
-- **Connectivity & Syntactic Improver Agent:** Improves sentence flow and fixes awkward phrasing.
-- **Content Checker Agent:** Ensures all words (except stopwords) from the PDF are present in the Markdown output.
-- **Image Extractor Agent:** Extracts images, diagrams, and tables from the PDF.
-- **Markdown Writer Agent:** Assembles the extracted and improved content into a Markdown file suitable for Obsidian.
-- **Orchestrator:** Coordinates the agents and manages the workflow.
+## Pipeline
 
-## Workflow
-1. **Input:** User provides a PDF file.
-2. **Extraction:** Text and images/diagrams/tables are extracted using dedicated agents and tools.
-3. **Improvement:** Text is improved for readability and connectivity.
-4. **Content Check:** Ensures completeness of Markdown notes.
-5. **Markdown Generation:** All content is assembled into a Markdown file for your Obsidian vault.
+1. **Transcriber** — extracts text from each PDF page using PyMuPDF.
+2. **Checker** — classifies each slide (content, course_info, image_description, introduction) and suggests editing actions (insert connectivity, flatten bullets, define acronyms, etc.).
+3. **Rewriter** — rewrites each slide applying the checker's actions, preserving all original content. Passes previous paragraph for flow continuity.
+4. **Math Formatter** — identifies mathematical expressions and converts them to LaTeX (`$inline$` and `$$display$$`).
+5. **Title Editor** — assigns heading hierarchy (`##`, `###`, `####`) and removes redundant titles.
+6. **Quality Checker** — reviews the final document and flags issues (collapsed lists, dangling references, content loss, repetition).
 
-## Tools & Technologies
-- Python 3.10+
-- [Groq](https://groq.com/) for LLM tasks
-- PDF parsing libraries (e.g., PyMuPDF, pdfplumber, pdf2image, camelot, etc.)
-- Agent-based architecture (e.g., using asyncio, multiprocessing, or frameworks like langchain/crewAI)
+Each step's output is cached so the pipeline can resume from where it left off if a step fails.
+
+## Project Structure
+
+```
+main.py                  Entry point
+config.yaml              Input PDF path
+src/
+  pipeline.py            Orchestrates all steps with rate limiting and caching
+  transcriber.py         PDF to per-slide text files
+  checker.py             LLM slide classifier and action suggester
+  rewriter.py            LLM rewriter and document concatenator
+  math_formatter.py      Math detection and LaTeX conversion
+  title_editor.py        Heading hierarchy editor
+  quality_checker.py     Final document quality reviewer
+  models.py              Pydantic models for structured LLM output
+  normalizer.py          Text normalization utilities
+  utilities/
+    prompts.py           All LLM system prompts
+cache/                   Intermediate and final outputs per PDF
+```
 
 ## Setup
+
 1. Create and activate a virtual environment:
    ```sh
    python -m venv pdf_parser
-   pdf_parser\Scripts\activate  # On Windows
+   pdf_parser\Scripts\activate  # Windows
+   source pdf_parser/bin/activate  # Linux/Mac
    ```
 2. Install dependencies:
    ```sh
    pip install -r requirements.txt
    ```
-3. Create a `.env` file with your API keys:
+3. Create a `.env` file with your API key:
    ```
-   GROQ_API_KEY=your_groq_api_key
    GOOGLE_API_KEY=your_google_api_key
    ```
 
 ## Usage
 
-**Option 1 — using `config.yaml`:**
-
-Create a `config.yaml` in the project root:
+Set the input PDF path in `config.yaml`:
 ```yaml
 input_pdf: 'path/to/your/slides.pdf'
-output_dir: 'path/to/output/directory'
 ```
+
 Then run:
 ```sh
 python main.py
 ```
 
-**Option 2 — passing paths directly:**
+Or pass the path directly:
 ```sh
-python main.py path/to/slides.pdf path/to/output.md
+python main.py path/to/slides.pdf
 ```
 
-The output Markdown file will be generated and ready for import into Obsidian.
+Output is saved to `cache/<pdf_name>/<pdf_name>.md`.
 
-## Customization
-- You can extend or modify agents for additional processing (e.g., citation extraction, advanced diagram parsing, etc.).
+## Tools and Technologies
+
+- Python 3.13
+- [Pydantic AI](https://github.com/pydantic/pydantic-ai) for LLM agents with structured output
+- Google Gemini (`gemini-3.1-flash-lite`) via the free tier
+- [PyMuPDF](https://pymupdf.readthedocs.io/) for PDF text extraction
