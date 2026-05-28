@@ -7,6 +7,8 @@ from .normalizer import normalize
 from .utilities.prompts import CHECKER_SYSTEM_PROMPT
 
 MODEL = "google:gemini-3.1-flash-lite"
+FULL_TEXT_MODEL = "google:gemini-3.5-flash"
+FULL_TEXT_RPM = 5
 WINDOW_SECONDS = 60
 
 checker_agent = Agent(MODEL, output_type=SlideReviewResponse, instructions=CHECKER_SYSTEM_PROMPT, model_settings={"temperature": 0})

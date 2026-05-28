@@ -46,6 +46,25 @@ class SlideReview(BaseModel):
     actions: list[SuggestedAction]
 
 
+class HeadingAction(str, Enum):
+    """What to do with a heading in the document."""
+    KEEP = "keep"
+    REMOVE = "remove"
+
+
+class HeadingChange(BaseModel):
+    """A single heading change identified by the title analysis agent."""
+    original_heading: str
+    action: HeadingAction
+    new_level: int | None
+    new_text: str | None
+
+
+class TitleAnalysis(BaseModel):
+    """All heading changes needed in the document."""
+    changes: list[HeadingChange]
+
+
 class IssueType(str, Enum):
     """Types of quality issues that can be flagged in the final document."""
     LIST_COLLAPSED = "list_collapsed"
@@ -68,13 +87,22 @@ class QualityReport(BaseModel):
     issues: list[QualityIssue]
 
 
-class MathExpression(BaseModel):
-    """A mathematical expression identified in slide text."""
+class SlideRewrite(BaseModel):
+    """Per-slide rewrite result stored as JSON artifact."""
+    slide_number: int
+    slide_type: str
+    title: str | None
+    is_continuation: bool
+    text: str
+
+
+class MathReplacement(BaseModel):
+    """A single math expression with its LaTeX equivalent."""
     original_text: str
+    latex: str
     is_display: bool
-    context: str
 
 
-class MathIdentifierResponse(BaseModel):
-    """All mathematical expressions found in a slide."""
-    expressions: list[MathExpression]
+class MathReplacementResponse(BaseModel):
+    """All math replacements identified for a slide."""
+    replacements: list[MathReplacement]
