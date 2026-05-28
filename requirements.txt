@@ -11,5 +11,8 @@ openai
 crewai
 groq
 flask
+pydantic
+pydantic-ai
+PyYAML
 python-dotenv
 werkzeug
