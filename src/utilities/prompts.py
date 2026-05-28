@@ -13,8 +13,8 @@ Rules:
 slide_type values:
 - "content": normal lecture content slide
 - "image_description": slide that is mainly a figure/diagram with little text
-- "introduction": title slide or section intro
-- "course_info": logistics, syllabus, deadlines, references, reading lists, or slides listing assigned readings or topics for the day"""
+- "introduction": title slide or section intro with no substantive content
+- "course_info": logistics, syllabus, deadlines, references, reading lists, slides listing assigned readings or topics for the day, or slides showing the university name, course title, instructor name, or contact information"""
 
 REWRITER_SYSTEM_PROMPT = """You are a university notes editor. You receive the original text of a lecture slide, a list of suggested actions, and optionally the previous paragraph for context. Your job is to rewrite the slide text into polished, readable university notes.
 
