@@ -1,39 +1,142 @@
+import json
 import time
 
 from pydantic_ai import Agent
 
-from .models import SlideReview, SlideReviewResponse, SlideType
+from .models import ReviewApprovalResponse, SlideReview, SlideReviewResponse, SlideType
 from .normalizer import normalize
-from .utilities.prompts import CHECKER_SYSTEM_PROMPT
+from .utilities.prompts import CHECKER_REVIEWER_PROMPT, CHECKER_SYSTEM_PROMPT
 
 MODEL = "google:gemini-3.1-flash-lite"
 FULL_TEXT_MODEL = "google:gemini-3.5-flash"
 FULL_TEXT_RPM = 5
 WINDOW_SECONDS = 60
+MAX_CHECKER_ATTEMPTS = 3
 
-checker_agent = Agent(MODEL, output_type=SlideReviewResponse, instructions=CHECKER_SYSTEM_PROMPT, model_settings={"temperature": 0})
+checker_agent = Agent(
+    MODEL,
+    output_type=SlideReviewResponse,
+    instructions=CHECKER_SYSTEM_PROMPT,
+    model_settings={"temperature": 0},
+)
+reviewer_agent = Agent(
+    MODEL,
+    output_type=ReviewApprovalResponse,
+    instructions=CHECKER_REVIEWER_PROMPT,
+    model_settings={"temperature": 0},
+)
 
 
 class LLMChecker:
     """Sends each slide's text to the LLM and collects structured reviews."""
 
+    def build_checker_prompt(self, normalized_text: str, retry_instruction: str | None = None) -> str:
+        """Build the checker prompt, optionally including reviewer feedback from a failed attempt."""
+        prompt = f"Slide text:\n\n{normalized_text}"
+        if retry_instruction:
+            prompt += (
+                "\n\nReviewer feedback from the previous attempt:\n"
+                f"{retry_instruction}\n\n"
+                "Return a corrected structured review. Keep every original_fragment as an exact excerpt from the slide text."
+            )
+        return prompt
+
+    def canonicalize_review(self, normalized_text: str, review: SlideReview) -> SlideReview:
+        """Deduplicate and sort actions so later application stays stable across runs."""
+        unique_actions = []
+        seen_actions: set[tuple[str, str]] = set()
+
+        for action in review.actions:
+            key = (action.action.value, action.original_fragment)
+            if key in seen_actions:
+                continue
+            seen_actions.add(key)
+            unique_actions.append(action)
+
+        def action_sort_key(action) -> tuple[int, str, str]:
+            position = normalized_text.find(action.original_fragment)
+            if position < 0:
+                position = len(normalized_text)
+            return (position, action.action.value, action.original_fragment)
+
+        ordered_actions = sorted(unique_actions, key=action_sort_key)
+        return review.model_copy(update={"actions": ordered_actions})
+
+    def review_proposal(self, normalized_text: str, review: SlideReview) -> ReviewApprovalResponse:
+        """Ask the reviewer agent to accept or reject the proposed review."""
+        proposal = {
+            "slide_type": review.slide_type.value,
+            "title": review.title,
+            "is_continuation": review.is_continuation,
+            "key_concepts": review.key_concepts,
+            "summary": review.summary,
+            "actions": [action.model_dump(mode="json") for action in review.actions],
+        }
+        prompt = (
+            f"Slide text:\n\n{normalized_text}\n\n"
+            "Proposed review JSON:\n"
+            f"{json.dumps(proposal, indent=2, ensure_ascii=False)}"
+        )
+        result = reviewer_agent.run_sync(prompt)
+        return result.output
+
     def check_one(self, slide_number: int, raw_text: str) -> SlideReview:
         """Review a single slide's text through the checker agent."""
         normalized_text = normalize(raw_text)
 
-        # Skip near-empty slides without calling the LLM
         if len(normalized_text.strip()) < 10:
             print(f"[slide {slide_number:03d}] skipped (empty)")
-            return SlideReview(slide_number=slide_number, slide_type=SlideType.INTRODUCTION, title=None, is_continuation=False, key_concepts=[], summary=None, actions=[])
+            return SlideReview(
+                slide_number=slide_number,
+                slide_type=SlideType.INTRODUCTION,
+                title=None,
+                is_continuation=False,
+                key_concepts=[],
+                summary=None,
+                actions=[],
+            )
 
-        print(f"[slide {slide_number:03d}] sending request...")
-        agent_result = checker_agent.run_sync(f"Slide text:\n\n{normalized_text}")
-        review = SlideReview(slide_number=slide_number, **agent_result.output.model_dump())
+        retry_instruction: str | None = None
+        last_review: SlideReview | None = None
 
-        title_display = f'"{review.title}"' if review.title else "no title"
-        actions_display = f"{len(review.actions)} action(s)" if review.actions else "no actions"
-        print(f"[slide {slide_number:03d}] done — {review.slide_type.value}, {title_display}, {actions_display}")
-        return review
+        for attempt in range(1, MAX_CHECKER_ATTEMPTS + 1):
+            print(f"[slide {slide_number:03d}] checker attempt {attempt}/{MAX_CHECKER_ATTEMPTS}...")
+            agent_result = checker_agent.run_sync(self.build_checker_prompt(normalized_text, retry_instruction))
+            review = SlideReview(slide_number=slide_number, checker_attempts=attempt, **agent_result.output.model_dump())
+            review = self.canonicalize_review(normalized_text, review)
+
+            approval = self.review_proposal(normalized_text, review)
+            review = review.model_copy(
+                update={
+                    "reviewer_approved": approval.approved,
+                    "reviewer_feedback": approval.reason,
+                    "checker_attempts": attempt,
+                }
+            )
+            last_review = review
+
+            if approval.approved:
+                title_display = f'"{review.title}"' if review.title else "no title"
+                actions_display = f"{len(review.actions)} action(s)" if review.actions else "no actions"
+                print(f"[slide {slide_number:03d}] approved - {review.slide_type.value}, {title_display}, {actions_display}")
+                return review
+
+            retry_instruction = approval.retry_instruction or approval.reason or "Tighten the review and remove unsupported actions."
+            print(f"[slide {slide_number:03d}] rejected - {retry_instruction}")
+
+        print(f"[slide {slide_number:03d}] review not approved after {MAX_CHECKER_ATTEMPTS} attempts; preserving original text later")
+        return last_review if last_review is not None else SlideReview(
+            slide_number=slide_number,
+            slide_type=SlideType.CONTENT,
+            title=None,
+            is_continuation=False,
+            key_concepts=[],
+            summary=None,
+            actions=[],
+            reviewer_approved=False,
+            reviewer_feedback="Checker did not produce an approved action plan.",
+            checker_attempts=MAX_CHECKER_ATTEMPTS,
+        )
 
     def check_all(self, slides: list[tuple[int, str]]) -> list[SlideReview]:
         """Review all slides, pausing after every 14 requests to stay under the API rate limit."""
@@ -45,10 +148,9 @@ class LLMChecker:
         for slide_number, text in slides:
             print(f"[{slide_number}/{total}]", end=" ", flush=True)
 
-            # Pause when the batch limit is reached within the rate window
             if request_count >= 14 and time.time() - batch_start < WINDOW_SECONDS:
                 remaining = WINDOW_SECONDS - (time.time() - batch_start)
-                print(f"Rate limit reached — waiting {remaining:.1f}s...")
+                print(f"Rate limit reached - waiting {remaining:.1f}s...")
                 time.sleep(remaining)
                 request_count = 0
                 batch_start = time.time()

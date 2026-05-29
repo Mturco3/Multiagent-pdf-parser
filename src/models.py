@@ -44,6 +44,16 @@ class SlideReview(BaseModel):
     key_concepts: list[str]
     summary: str | None
     actions: list[SuggestedAction]
+    reviewer_approved: bool = True
+    reviewer_feedback: str | None = None
+    checker_attempts: int = 1
+
+
+class ReviewApprovalResponse(BaseModel):
+    """Reviewer verdict on whether a proposed slide edit plan is safe to apply."""
+    approved: bool
+    reason: str | None
+    retry_instruction: str | None
 
 
 class HeadingAction(str, Enum):
@@ -94,6 +104,7 @@ class SlideRewrite(BaseModel):
     title: str | None
     is_continuation: bool
     text: str
+    rewrite_mode: str = "approved_actions_only"
 
 
 class MathReplacement(BaseModel):

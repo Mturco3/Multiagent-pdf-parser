@@ -102,7 +102,10 @@ class Pipeline:
         for filename in expected_filenames:
             filepath = os.path.join(dir_path, filename)
             with open(filepath, encoding="utf-8") as file_handle:
-                slides.append(SlideRewrite(**json.load(file_handle)))
+                payload = json.load(file_handle)
+                if "rewrite_mode" not in payload:
+                    return None
+                slides.append(SlideRewrite(**payload))
 
         return slides
 
@@ -224,8 +227,13 @@ class Pipeline:
             for filename in expected_review_files:
                 review_path = os.path.join(reviews_dir, filename)
                 with open(review_path, encoding="utf-8") as file_handle:
-                    reviews.append(SlideReview(**json.load(file_handle)))
-            return reviews
+                    payload = json.load(file_handle)
+                    if "reviewer_approved" not in payload or "checker_attempts" not in payload:
+                        reviews = []
+                        break
+                    reviews.append(SlideReview(**payload))
+            if reviews:
+                return reviews
 
         print("=" * 60)
         print("LLM Checker")
