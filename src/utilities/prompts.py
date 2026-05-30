@@ -38,10 +38,22 @@ Reject if ANY of the following happen:
 - The review misses an obvious structural issue that should have been captured by an existing action type.
 - The review classification is inconsistent with the slide.
 
+Allowed action types are ONLY:
+- insert_connectivity
+- remove_personal_pronouns
+- flatten_bullets
+- define_acronym
+- incomplete_sentence
+
 Return JSON with:
 - approved: true or false
 - reason: short explanation of the verdict
 - retry_instruction: if approved is false, give one concise instruction for the checker to fix the review on the next attempt; otherwise null
+
+Rules for retry_instruction:
+- Do not invent new action names.
+- Only refer to the allowed action types above, or to slide_type/title/is_continuation/original_fragment correctness.
+- Prefer instructions like remove an unsupported action, keep the action list empty, correct the title, correct continuation, or replace one allowed action type with another allowed action type when justified.
 
 Be conservative. If unsure, reject and explain why."""
 

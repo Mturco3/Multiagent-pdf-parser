@@ -68,6 +68,29 @@ class Pipeline:
             filepath = os.path.join(directory, filename)
             os.remove(filepath)
 
+    def save_review_json(self, reviews_dir: str, review: SlideReview):
+        """Persist one slide review immediately so the checker can resume after failures."""
+        review_filename = f"slide_{review.slide_number:03d}_review.json"
+        review_path = os.path.join(reviews_dir, review_filename)
+        with open(review_path, "w", encoding="utf-8") as file_handle:
+            json.dump(review.model_dump(), file_handle, indent=2, ensure_ascii=False)
+
+    def load_review_json(self, reviews_dir: str, slide_number: int) -> SlideReview | None:
+        """Load one cached review when it matches the current schema."""
+        review_filename = f"slide_{slide_number:03d}_review.json"
+        review_path = os.path.join(reviews_dir, review_filename)
+        if not os.path.exists(review_path):
+            return None
+
+        with open(review_path, encoding="utf-8") as file_handle:
+            payload = json.load(file_handle)
+
+        if "reviewer_approved" not in payload or "checker_attempts" not in payload:
+            os.remove(review_path)
+            return None
+
+        return SlideReview(**payload)
+
     def save_slide_jsons(self, directory: str, slides: list[SlideRewrite]):
         """Save per-slide rewrite artifacts after clearing stale files."""
         dir_path = os.path.join(self.cache_dir, directory)
@@ -211,29 +234,13 @@ class Pipeline:
         print("=" * 60)
 
     def _run_checker(self, slides: list[tuple[int, str]], reviews_dir: str, total: int) -> list[SlideReview]:
-        """Run the checker step or load an exact cached review set."""
-        expected_review_files: list[str] = []
-        for slide_number, _ in slides:
-            expected_review_files.append(f"slide_{slide_number:03d}_review.json")
-
-        review_files = os.listdir(reviews_dir)
-        review_files = [name for name in review_files if name.endswith("_review.json")]
-        review_files.sort()
-        if review_files == expected_review_files:
-            print("=" * 60)
-            print("Loading cached reviews")
-            print("=" * 60)
-            reviews: list[SlideReview] = []
-            for filename in expected_review_files:
-                review_path = os.path.join(reviews_dir, filename)
-                with open(review_path, encoding="utf-8") as file_handle:
-                    payload = json.load(file_handle)
-                    if "reviewer_approved" not in payload or "checker_attempts" not in payload:
-                        reviews = []
-                        break
-                    reviews.append(SlideReview(**payload))
-            if reviews:
-                return reviews
+        """Run the checker step, reusing and extending any valid per-slide cached reviews."""
+        expected_review_filenames = {f"slide_{slide_number:03d}_review.json" for slide_number, _ in slides}
+        for filename in os.listdir(reviews_dir):
+            if not filename.endswith("_review.json"):
+                continue
+            if filename not in expected_review_filenames:
+                os.remove(os.path.join(reviews_dir, filename))
 
         print("=" * 60)
         print("LLM Checker")
@@ -242,17 +249,23 @@ class Pipeline:
         print("=" * 60)
 
         checker = LLMChecker()
-        reviews = checker.check_all(slides)
+        reviews: list[SlideReview] = []
+        for index, (slide_number, text) in enumerate(slides, start=1):
+            print(f"[{slide_number}/{total}]", end=" ", flush=True)
+            cached_review = self.load_review_json(reviews_dir, slide_number)
+            if cached_review is not None:
+                print(f"cached - {cached_review.slide_type.value}")
+                reviews.append(cached_review)
+                continue
 
-        self.clear_json_files(reviews_dir, "_review.json")
+            review = checker.check_one(slide_number, text)
+            self.save_review_json(reviews_dir, review)
+            reviews.append(review)
 
         print("\n" + "=" * 60)
         print("Writing review files...")
         for review in reviews:
             review_filename = f"slide_{review.slide_number:03d}_review.json"
-            review_path = os.path.join(reviews_dir, review_filename)
-            with open(review_path, "w", encoding="utf-8") as file_handle:
-                json.dump(review.model_dump(), file_handle, indent=2, ensure_ascii=False)
 
             title_display = f'"{review.title}"' if review.title else "no title"
             actions_display = f"{len(review.actions)} action(s)" if review.actions else "no actions"

@@ -12,6 +12,7 @@ FULL_TEXT_MODEL = "google:gemini-3.5-flash"
 FULL_TEXT_RPM = 5
 WINDOW_SECONDS = 60
 MAX_CHECKER_ATTEMPTS = 3
+CHECKER_MODEL_RPM = 14
 
 checker_agent = Agent(
     MODEL,
@@ -30,6 +31,40 @@ reviewer_agent = Agent(
 class LLMChecker:
     """Sends each slide's text to the LLM and collects structured reviews."""
 
+    def __init__(self):
+        """Track checker/reviewer model calls so quota pacing uses real request counts."""
+        self.request_count = 0
+        self.batch_start = time.time()
+
+    def wait_for_capacity(self):
+        """Pause before the next model call when the current quota window is exhausted."""
+        elapsed = time.time() - self.batch_start
+        if elapsed >= WINDOW_SECONDS:
+            self.request_count = 0
+            self.batch_start = time.time()
+            return
+
+        if self.request_count >= CHECKER_MODEL_RPM:
+            remaining = WINDOW_SECONDS - elapsed
+            print(f"Rate limit reached - waiting {remaining:.1f}s...")
+            time.sleep(remaining)
+            self.request_count = 0
+            self.batch_start = time.time()
+
+    def run_checker_request(self, prompt: str) -> SlideReviewResponse:
+        """Call the checker model while respecting the per-minute request budget."""
+        self.wait_for_capacity()
+        result = checker_agent.run_sync(prompt)
+        self.request_count += 1
+        return result.output
+
+    def run_reviewer_request(self, prompt: str) -> ReviewApprovalResponse:
+        """Call the reviewer model while respecting the per-minute request budget."""
+        self.wait_for_capacity()
+        result = reviewer_agent.run_sync(prompt)
+        self.request_count += 1
+        return result.output
+
     def build_checker_prompt(self, normalized_text: str, retry_instruction: str | None = None) -> str:
         """Build the checker prompt, optionally including reviewer feedback from a failed attempt."""
         prompt = f"Slide text:\n\n{normalized_text}"
@@ -37,7 +72,8 @@ class LLMChecker:
             prompt += (
                 "\n\nReviewer feedback from the previous attempt:\n"
                 f"{retry_instruction}\n\n"
-                "Return a corrected structured review. Keep every original_fragment as an exact excerpt from the slide text."
+                "Return a corrected structured review. Keep every original_fragment as an exact excerpt from the slide text. "
+                "Use only these action types when needed: insert_connectivity, remove_personal_pronouns, flatten_bullets, define_acronym, incomplete_sentence."
             )
         return prompt
 
@@ -77,8 +113,7 @@ class LLMChecker:
             "Proposed review JSON:\n"
             f"{json.dumps(proposal, indent=2, ensure_ascii=False)}"
         )
-        result = reviewer_agent.run_sync(prompt)
-        return result.output
+        return self.run_reviewer_request(prompt)
 
     def check_one(self, slide_number: int, raw_text: str) -> SlideReview:
         """Review a single slide's text through the checker agent."""
@@ -101,8 +136,8 @@ class LLMChecker:
 
         for attempt in range(1, MAX_CHECKER_ATTEMPTS + 1):
             print(f"[slide {slide_number:03d}] checker attempt {attempt}/{MAX_CHECKER_ATTEMPTS}...")
-            agent_result = checker_agent.run_sync(self.build_checker_prompt(normalized_text, retry_instruction))
-            review = SlideReview(slide_number=slide_number, checker_attempts=attempt, **agent_result.output.model_dump())
+            checker_output = self.run_checker_request(self.build_checker_prompt(normalized_text, retry_instruction))
+            review = SlideReview(slide_number=slide_number, checker_attempts=attempt, **checker_output.model_dump())
             review = self.canonicalize_review(normalized_text, review)
 
             approval = self.review_proposal(normalized_text, review)
@@ -142,20 +177,10 @@ class LLMChecker:
         """Review all slides, pausing after every 14 requests to stay under the API rate limit."""
         reviews = []
         total = len(slides)
-        request_count = 0
-        batch_start = time.time()
 
         for slide_number, text in slides:
             print(f"[{slide_number}/{total}]", end=" ", flush=True)
 
-            if request_count >= 14 and time.time() - batch_start < WINDOW_SECONDS:
-                remaining = WINDOW_SECONDS - (time.time() - batch_start)
-                print(f"Rate limit reached - waiting {remaining:.1f}s...")
-                time.sleep(remaining)
-                request_count = 0
-                batch_start = time.time()
-
             reviews.append(self.check_one(slide_number, text))
-            request_count += 1
 
         return reviews
