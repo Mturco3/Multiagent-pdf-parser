@@ -4,12 +4,12 @@ import time
 from pydantic_ai import Agent
 from pydantic_ai.exceptions import ModelHTTPError
 
-from .checker import MODEL, WINDOW_SECONDS
 from .models import MathReplacementResponse, SlideRewrite
+from .utilities.model_config import MATH_MODEL, MATH_MODEL_RPM, WINDOW_SECONDS
 from .utilities.prompts import MATH_FORMATTER_PROMPT
+from .utilities.rate_limit import RequestPacer
 
-math_agent = Agent(MODEL, output_type=MathReplacementResponse, instructions=MATH_FORMATTER_PROMPT, model_settings={"temperature": 0})
-MATH_MODEL_RPM = 12
+math_agent = Agent(MATH_MODEL, output_type=MathReplacementResponse, instructions=MATH_FORMATTER_PROMPT, model_settings={"temperature": 0})
 MAX_MODEL_RETRIES = 3
 TRANSIENT_STATUS_CODES = {429, 503}
 
@@ -19,23 +19,7 @@ class MathFormatter:
 
     def __init__(self):
         """Track math-model calls so long runs can pace and retry safely."""
-        self.request_count = 0
-        self.batch_start = time.time()
-
-    def wait_for_capacity(self):
-        """Pause before the next math-model call when the current quota window is exhausted."""
-        elapsed = time.time() - self.batch_start
-        if elapsed >= WINDOW_SECONDS:
-            self.request_count = 0
-            self.batch_start = time.time()
-            return
-
-        if self.request_count >= MATH_MODEL_RPM:
-            remaining = WINDOW_SECONDS - elapsed
-            print(f"Rate limit reached - waiting {remaining:.1f}s...")
-            time.sleep(remaining)
-            self.request_count = 0
-            self.batch_start = time.time()
+        self.pacer = RequestPacer(WINDOW_SECONDS)
 
     def get_retry_delay(self, error: ModelHTTPError) -> float:
         """Extract a provider-suggested retry delay when one is available."""
@@ -68,10 +52,10 @@ class MathFormatter:
         """Call the math model with pacing and retries for transient provider failures."""
         attempt = 0
         while True:
-            self.wait_for_capacity()
+            self.pacer.wait_for_capacity(MATH_MODEL, MATH_MODEL_RPM)
             try:
                 result = math_agent.run_sync(prompt)
-                self.request_count += 1
+                self.pacer.mark_request(MATH_MODEL)
                 return result.output
             except ModelHTTPError as error:
                 if error.status_code not in TRANSIENT_STATUS_CODES or attempt >= MAX_MODEL_RETRIES - 1:
@@ -81,8 +65,7 @@ class MathFormatter:
                 attempt += 1
                 print(f"math transient error {error.status_code} - retrying in {delay:.1f}s ({attempt}/{MAX_MODEL_RETRIES})...")
                 time.sleep(delay)
-                self.request_count = 0
-                self.batch_start = time.time()
+                self.pacer.reset(MATH_MODEL, MATH_MODEL_RPM)
 
     def apply_replacement(self, text: str, original_text: str, latex: str) -> tuple[str, bool]:
         """Replace one standalone math fragment without interpreting LaTeX escapes."""

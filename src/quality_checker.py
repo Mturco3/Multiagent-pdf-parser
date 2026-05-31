@@ -3,16 +3,23 @@ import time
 from pydantic_ai import Agent
 from pydantic_ai.exceptions import ModelHTTPError
 
-from .checker import FULL_TEXT_MODEL, FULL_TEXT_RPM, WINDOW_SECONDS
 from .models import QualityReport, IssueType
+from .utilities.model_config import (
+    QUALITY_FIXER_MODEL,
+    QUALITY_FIXER_MODEL_RPM,
+    QUALITY_IDENTIFIER_MODEL,
+    QUALITY_IDENTIFIER_MODEL_RPM,
+    WINDOW_SECONDS,
+)
 from .utilities.prompts import QUALITY_CHECKER_PROMPT, QUALITY_FIXER_PROMPT
+from .utilities.rate_limit import RequestPacer
 
 MAX_MODEL_RETRIES = 3
 TRANSIENT_STATUS_CODES = {429, 503}
 
 # Identifies quality issues in the document
 quality_identifier_agent = Agent(
-    FULL_TEXT_MODEL,
+    QUALITY_IDENTIFIER_MODEL,
     output_type=QualityReport,
     instructions=QUALITY_CHECKER_PROMPT,
     model_settings={"temperature": 0}
@@ -20,7 +27,7 @@ quality_identifier_agent = Agent(
 
 # Fixes a single text fragment based on an identified issue
 quality_fixer_agent = Agent(
-    FULL_TEXT_MODEL,
+    QUALITY_FIXER_MODEL,
     output_type=str,
     instructions=QUALITY_FIXER_PROMPT,
     model_settings={"temperature": 0}
@@ -29,6 +36,9 @@ quality_fixer_agent = Agent(
 
 class QualityChecker:
     """Identifies quality issues via LLM, then fixes them with targeted LLM calls."""
+
+    def __init__(self):
+        self.pacer = RequestPacer(WINDOW_SECONDS)
 
     def get_retry_delay(self, error: ModelHTTPError) -> float:
         """Extract a provider-suggested retry delay when one is available."""
@@ -57,12 +67,15 @@ class QualityChecker:
             return float(WINDOW_SECONDS)
         return 30.0
 
-    def run_with_transient_retry(self, request_name: str, runner, prompt: str):
+    def run_with_transient_retry(self, request_name: str, model_name: str, rpm: int, runner, prompt: str):
         """Retry transient provider failures with backoff while keeping prompts deterministic."""
         attempt = 0
         while True:
+            self.pacer.wait_for_capacity(model_name, rpm)
             try:
-                return runner(prompt)
+                result = runner(prompt)
+                self.pacer.mark_request(model_name)
+                return result
             except ModelHTTPError as error:
                 if error.status_code not in TRANSIENT_STATUS_CODES or attempt >= MAX_MODEL_RETRIES - 1:
                     raise
@@ -71,11 +84,18 @@ class QualityChecker:
                 attempt += 1
                 print(f"{request_name} transient error {error.status_code} - retrying in {delay:.1f}s ({attempt}/{MAX_MODEL_RETRIES})...")
                 time.sleep(delay)
+                self.pacer.reset(model_name, rpm)
 
     def identify(self, document: str) -> QualityReport:
         """Send the document to the LLM for quality review."""
         print("Identifying quality issues...")
-        result = self.run_with_transient_retry("quality-identifier", quality_identifier_agent.run_sync, f"Document:\n\n{document}")
+        result = self.run_with_transient_retry(
+            "quality-identifier",
+            QUALITY_IDENTIFIER_MODEL,
+            QUALITY_IDENTIFIER_MODEL_RPM,
+            quality_identifier_agent.run_sync,
+            f"Document:\n\n{document}",
+        )
         report = result.output
         if report.issues:
             for issue in report.issues:
@@ -93,9 +113,6 @@ class QualityChecker:
             print("No fixable issues.")
             return document
 
-        request_count = 0
-        batch_start = time.time()
-
         for issue in fixable_issues:
             # Check that the problematic text exists in the document
             if issue.problematic_text not in document:
@@ -111,19 +128,16 @@ class QualityChecker:
                 print(f"[fixed] {issue.issue_type.value} (removed duplicate)")
                 continue
 
-            # Rate limiting for full-text model
-            if request_count >= FULL_TEXT_RPM - 1 and time.time() - batch_start < WINDOW_SECONDS:
-                remaining = WINDOW_SECONDS - (time.time() - batch_start)
-                print(f"Rate limit reached - waiting {remaining:.1f}s...")
-                time.sleep(remaining)
-                request_count = 0
-                batch_start = time.time()
-
             print(f"[fixing] {issue.issue_type.value}...")
             prompt = f"Issue type: {issue.issue_type.value}\nExplanation: {issue.explanation}\n\nText to fix:\n{issue.problematic_text}"
             try:
-                result = self.run_with_transient_retry("quality-fixer", quality_fixer_agent.run_sync, prompt)
-                request_count += 1
+                result = self.run_with_transient_retry(
+                    "quality-fixer",
+                    QUALITY_FIXER_MODEL,
+                    QUALITY_FIXER_MODEL_RPM,
+                    quality_fixer_agent.run_sync,
+                    prompt,
+                )
                 document = document.replace(issue.problematic_text, result.output, 1)
                 print(f"[fixed] {issue.issue_type.value}")
             except Exception as error:

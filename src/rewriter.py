@@ -1,17 +1,70 @@
 import time
 
 from pydantic_ai import Agent
+from pydantic_ai.exceptions import ModelHTTPError
 
-from .checker import MODEL, WINDOW_SECONDS
 from .models import SlideReview, SlideRewrite, SlideType
 from .normalizer import normalize
+from .utilities.model_config import REWRITER_MODEL, REWRITER_MODEL_RPM, WINDOW_SECONDS
 from .utilities.prompts import REWRITER_SYSTEM_PROMPT
+from .utilities.rate_limit import RequestPacer
 
-rewriter_agent = Agent(MODEL, output_type=str, instructions=REWRITER_SYSTEM_PROMPT, model_settings={"temperature": 0})
+rewriter_agent = Agent(REWRITER_MODEL, output_type=str, instructions=REWRITER_SYSTEM_PROMPT, model_settings={"temperature": 0})
+MAX_MODEL_RETRIES = 3
+TRANSIENT_STATUS_CODES = {429, 503}
 
 
 class LLMRewriter:
     """Rewrite slide text while preserving structure and content."""
+
+    def __init__(self):
+        self.pacer = RequestPacer(WINDOW_SECONDS)
+
+    def get_retry_delay(self, error: ModelHTTPError) -> float:
+        """Extract a provider-suggested retry delay when one is available."""
+        retry_delay = None
+        body = error.body
+        if isinstance(body, dict):
+            error_payload = body.get("error")
+            if isinstance(error_payload, dict):
+                details = error_payload.get("details")
+                if isinstance(details, list):
+                    for detail in details:
+                        if not isinstance(detail, dict):
+                            continue
+                        retry_text = detail.get("retryDelay")
+                        if isinstance(retry_text, str) and retry_text.endswith("s"):
+                            try:
+                                retry_delay = float(retry_text[:-1])
+                                break
+                            except ValueError:
+                                continue
+
+        if retry_delay is not None:
+            return max(retry_delay, 1.0)
+
+        if error.status_code == 429:
+            return float(WINDOW_SECONDS)
+        return 30.0
+
+    def run_rewriter_request(self, prompt: str) -> str:
+        """Call the rewrite model with deterministic pacing and transient retries."""
+        attempt = 0
+        while True:
+            self.pacer.wait_for_capacity(REWRITER_MODEL, REWRITER_MODEL_RPM)
+            try:
+                result = rewriter_agent.run_sync(prompt)
+                self.pacer.mark_request(REWRITER_MODEL)
+                return result.output
+            except ModelHTTPError as error:
+                if error.status_code not in TRANSIENT_STATUS_CODES or attempt >= MAX_MODEL_RETRIES - 1:
+                    raise
+
+                delay = self.get_retry_delay(error)
+                attempt += 1
+                print(f"rewriter transient error {error.status_code} - retrying in {delay:.1f}s ({attempt}/{MAX_MODEL_RETRIES})...")
+                time.sleep(delay)
+                self.pacer.reset(REWRITER_MODEL, REWRITER_MODEL_RPM)
 
     def build_introduction_output(self, review: SlideReview) -> SlideRewrite | None:
         """Return a heading-only output for introduction slides when possible."""
@@ -68,7 +121,7 @@ class LLMRewriter:
             prompt += f"\n\nPrevious paragraph (for transition context only - do NOT include this content in your output):\n{previous_paragraph}"
 
         print(f"[slide {review.slide_number:03d}] rewriting ({len(review.actions)} approved action(s))...")
-        agent_result = rewriter_agent.run_sync(prompt)
+        rewritten_text = self.run_rewriter_request(prompt)
         print(f"[slide {review.slide_number:03d}] done")
 
         return SlideRewrite(
@@ -76,15 +129,13 @@ class LLMRewriter:
             slide_type=review.slide_type.value,
             title=review.title,
             is_continuation=review.is_continuation,
-            text=agent_result.output,
+            text=rewritten_text,
         )
 
     def rewrite_all(self, slides: list[tuple[int, str]], reviews: list[SlideReview]) -> list[SlideRewrite]:
         """Rewrite all slides that should appear in the final document."""
         review_by_number = {review.slide_number: review for review in reviews}
         results: list[SlideRewrite] = []
-        request_count = 0
-        batch_start = time.time()
         previous_paragraph: str | None = None
         current_section_title: str | None = None
         total = len(slides)
@@ -103,17 +154,8 @@ class LLMRewriter:
                 and review.reviewer_approved
                 and bool(review.actions)
             )
-            if should_call_llm and request_count >= 14 and time.time() - batch_start < WINDOW_SECONDS:
-                remaining = WINDOW_SECONDS - (time.time() - batch_start)
-                print(f"Rate limit reached - waiting {remaining:.1f}s...")
-                time.sleep(remaining)
-                request_count = 0
-                batch_start = time.time()
 
             rewrite = self.rewrite_one(text, review, transition_paragraph if should_call_llm else None)
-
-            if should_call_llm:
-                request_count += 1
 
             if rewrite is None:
                 continue

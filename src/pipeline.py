@@ -3,13 +3,14 @@ import os
 import time
 import hashlib
 
-from .checker import LLMChecker, WINDOW_SECONDS
+from .checker import LLMChecker
 from .math_formatter import MathFormatter
 from .models import QualityReport, SlideReview, SlideRewrite, SlideType, TitleAnalysis
 from .quality_checker import QualityChecker
 from .rewriter import LLMRewriter
 from .title_editor import TitleEditor
 from .transcriber import CACHE_DIR, Transcriber
+from .utilities.model_config import WINDOW_SECONDS, get_model_summary
 
 
 class Pipeline:
@@ -202,9 +203,18 @@ class Pipeline:
 
         return "\n\n".join(parts)
 
+    def print_model_configuration(self):
+        """Show the active stage-to-model mapping before the pipeline starts."""
+        print("=" * 60)
+        print("Model Configuration")
+        for stage, model_name, rpm in get_model_summary():
+            print(f"{stage:18} {model_name}  rpm={rpm}")
+        print("=" * 60)
+
     def run(self):
         """Execute the full pipeline and save the final markdown file."""
         os.makedirs(self.cache_dir, exist_ok=True)
+        self.print_model_configuration()
 
         transcriber = Transcriber(self.pdf_path)
         transcriptions_dir = transcriber.run()

@@ -6,25 +6,22 @@ from pydantic_ai.exceptions import ModelHTTPError
 
 from .models import ReviewApprovalResponse, SlideReview, SlideReviewResponse, SlideType
 from .normalizer import normalize
+from .utilities.model_config import CHECKER_MODEL, CHECKER_MODEL_RPM, REVIEWER_MODEL, REVIEWER_MODEL_RPM, WINDOW_SECONDS
 from .utilities.prompts import CHECKER_REVIEWER_PROMPT, CHECKER_SYSTEM_PROMPT
+from .utilities.rate_limit import RequestPacer
 
-MODEL = "google:gemini-3.1-flash-lite"
-FULL_TEXT_MODEL = "google:gemini-3.5-flash"
-FULL_TEXT_RPM = 5
-WINDOW_SECONDS = 60
 MAX_CHECKER_ATTEMPTS = 3
-CHECKER_MODEL_RPM = 14
 MAX_MODEL_RETRIES = 3
 TRANSIENT_STATUS_CODES = {429, 503}
 
 checker_agent = Agent(
-    MODEL,
+    CHECKER_MODEL,
     output_type=SlideReviewResponse,
     instructions=CHECKER_SYSTEM_PROMPT,
     model_settings={"temperature": 0},
 )
 reviewer_agent = Agent(
-    MODEL,
+    REVIEWER_MODEL,
     output_type=ReviewApprovalResponse,
     instructions=CHECKER_REVIEWER_PROMPT,
     model_settings={"temperature": 0},
@@ -35,24 +32,8 @@ class LLMChecker:
     """Sends each slide's text to the LLM and collects structured reviews."""
 
     def __init__(self):
-        """Track checker/reviewer model calls so quota pacing uses real request counts."""
-        self.request_count = 0
-        self.batch_start = time.time()
-
-    def wait_for_capacity(self):
-        """Pause before the next model call when the current quota window is exhausted."""
-        elapsed = time.time() - self.batch_start
-        if elapsed >= WINDOW_SECONDS:
-            self.request_count = 0
-            self.batch_start = time.time()
-            return
-
-        if self.request_count >= CHECKER_MODEL_RPM:
-            remaining = WINDOW_SECONDS - elapsed
-            print(f"Rate limit reached - waiting {remaining:.1f}s...")
-            time.sleep(remaining)
-            self.request_count = 0
-            self.batch_start = time.time()
+        """Track checker/reviewer model calls using per-model rate buckets."""
+        self.pacer = RequestPacer(WINDOW_SECONDS)
 
     def get_retry_delay(self, error: ModelHTTPError) -> float:
         """Extract a useful retry delay from the provider response when available."""
@@ -81,14 +62,14 @@ class LLMChecker:
             return float(WINDOW_SECONDS)
         return 30.0
 
-    def run_with_transient_retry(self, request_name: str, runner, prompt: str):
+    def run_with_transient_retry(self, request_name: str, model_name: str, rpm: int, runner, prompt: str):
         """Retry transient provider failures with backoff while preserving deterministic prompts."""
         attempt = 0
         while True:
-            self.wait_for_capacity()
+            self.pacer.wait_for_capacity(model_name, rpm)
             try:
                 result = runner(prompt)
-                self.request_count += 1
+                self.pacer.mark_request(model_name)
                 return result.output
             except ModelHTTPError as error:
                 if error.status_code not in TRANSIENT_STATUS_CODES or attempt >= MAX_MODEL_RETRIES - 1:
@@ -98,16 +79,15 @@ class LLMChecker:
                 attempt += 1
                 print(f"{request_name} transient error {error.status_code} - retrying in {delay:.1f}s ({attempt}/{MAX_MODEL_RETRIES})...")
                 time.sleep(delay)
-                self.request_count = 0
-                self.batch_start = time.time()
+                self.pacer.reset(model_name, rpm)
 
     def run_checker_request(self, prompt: str) -> SlideReviewResponse:
         """Call the checker model while respecting the per-minute request budget."""
-        return self.run_with_transient_retry("checker", checker_agent.run_sync, prompt)
+        return self.run_with_transient_retry("checker", CHECKER_MODEL, CHECKER_MODEL_RPM, checker_agent.run_sync, prompt)
 
     def run_reviewer_request(self, prompt: str) -> ReviewApprovalResponse:
         """Call the reviewer model while respecting the per-minute request budget."""
-        return self.run_with_transient_retry("reviewer", reviewer_agent.run_sync, prompt)
+        return self.run_with_transient_retry("reviewer", REVIEWER_MODEL, REVIEWER_MODEL_RPM, reviewer_agent.run_sync, prompt)
 
     def build_checker_prompt(self, normalized_text: str, retry_instruction: str | None = None) -> str:
         """Build the checker prompt, optionally including reviewer feedback from a failed attempt."""
@@ -218,7 +198,7 @@ class LLMChecker:
         )
 
     def check_all(self, slides: list[tuple[int, str]]) -> list[SlideReview]:
-        """Review all slides, pausing after every 14 requests to stay under the API rate limit."""
+        """Review all slides while pacing real checker and reviewer model calls."""
         reviews = []
         total = len(slides)
 
