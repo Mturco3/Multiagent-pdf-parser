@@ -2,6 +2,7 @@ import json
 import time
 
 from pydantic_ai import Agent
+from pydantic_ai.exceptions import ModelHTTPError
 
 from .models import ReviewApprovalResponse, SlideReview, SlideReviewResponse, SlideType
 from .normalizer import normalize
@@ -13,6 +14,8 @@ FULL_TEXT_RPM = 5
 WINDOW_SECONDS = 60
 MAX_CHECKER_ATTEMPTS = 3
 CHECKER_MODEL_RPM = 14
+MAX_MODEL_RETRIES = 3
+TRANSIENT_STATUS_CODES = {429, 503}
 
 checker_agent = Agent(
     MODEL,
@@ -51,19 +54,60 @@ class LLMChecker:
             self.request_count = 0
             self.batch_start = time.time()
 
+    def get_retry_delay(self, error: ModelHTTPError) -> float:
+        """Extract a useful retry delay from the provider response when available."""
+        retry_delay = None
+        body = error.body
+        if isinstance(body, dict):
+            error_payload = body.get("error")
+            if isinstance(error_payload, dict):
+                details = error_payload.get("details")
+                if isinstance(details, list):
+                    for detail in details:
+                        if not isinstance(detail, dict):
+                            continue
+                        retry_text = detail.get("retryDelay")
+                        if isinstance(retry_text, str) and retry_text.endswith("s"):
+                            try:
+                                retry_delay = float(retry_text[:-1])
+                                break
+                            except ValueError:
+                                continue
+
+        if retry_delay is not None:
+            return max(retry_delay, 1.0)
+
+        if error.status_code == 429:
+            return float(WINDOW_SECONDS)
+        return 30.0
+
+    def run_with_transient_retry(self, request_name: str, runner, prompt: str):
+        """Retry transient provider failures with backoff while preserving deterministic prompts."""
+        attempt = 0
+        while True:
+            self.wait_for_capacity()
+            try:
+                result = runner(prompt)
+                self.request_count += 1
+                return result.output
+            except ModelHTTPError as error:
+                if error.status_code not in TRANSIENT_STATUS_CODES or attempt >= MAX_MODEL_RETRIES - 1:
+                    raise
+
+                delay = self.get_retry_delay(error)
+                attempt += 1
+                print(f"{request_name} transient error {error.status_code} - retrying in {delay:.1f}s ({attempt}/{MAX_MODEL_RETRIES})...")
+                time.sleep(delay)
+                self.request_count = 0
+                self.batch_start = time.time()
+
     def run_checker_request(self, prompt: str) -> SlideReviewResponse:
         """Call the checker model while respecting the per-minute request budget."""
-        self.wait_for_capacity()
-        result = checker_agent.run_sync(prompt)
-        self.request_count += 1
-        return result.output
+        return self.run_with_transient_retry("checker", checker_agent.run_sync, prompt)
 
     def run_reviewer_request(self, prompt: str) -> ReviewApprovalResponse:
         """Call the reviewer model while respecting the per-minute request budget."""
-        self.wait_for_capacity()
-        result = reviewer_agent.run_sync(prompt)
-        self.request_count += 1
-        return result.output
+        return self.run_with_transient_retry("reviewer", reviewer_agent.run_sync, prompt)
 
     def build_checker_prompt(self, normalized_text: str, retry_instruction: str | None = None) -> str:
         """Build the checker prompt, optionally including reviewer feedback from a failed attempt."""

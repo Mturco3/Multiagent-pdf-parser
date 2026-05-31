@@ -7,8 +7,9 @@ Rules:
 - key_concepts: list of main technical concepts introduced or used (empty list if none).
 - summary: one sentence for content slides, null for introduction/course_info/image_description.
 - actions: only flag issues that are clearly present. Empty list if none.
+- For remove_personal_pronouns: only flag a fragment when the slide uses first- or second-person wording or possessives that should be rewritten impersonally.
 - For insert_connectivity: only flag consecutive sentences/bullets that are logically sequential or causally linked.
-- For flatten_bullets: flag a group of bullets that are NOT a true enumeration of distinct items, but rather a sequence of cohesive sentences or thoughts that were formatted as bullets only for slide layout reasons. These should be converted into a fluid paragraph. Also flag bullet lists where each item is a short phrase (not a full sentence with its own explanation) listing consequences, effects, properties, or characteristics of the same concept — these read more naturally as a comma-separated clause within a flowing paragraph. Do NOT flag bullets that enumerate actual distinct elements with substantive definitions or explanations after each item — those are real lists and must stay as lists.
+- For flatten_bullets: flag only a real bullet-like or numbered list group that is present in the slide text. Use it when those bullets are NOT a true enumeration of distinct items, but rather a sequence of cohesive sentences or thoughts that were formatted as bullets only for slide layout reasons. Also use it for bullet lists where each item is a short phrase (not a full sentence with its own explanation) listing consequences, effects, properties, or characteristics of the same concept — these read more naturally as a comma-separated clause within a flowing paragraph. Do NOT flag ordinary paragraphs, multi-paragraph prose, tables, or table-like text. Do NOT flag bullets that enumerate actual distinct elements with substantive definitions or explanations after each item — those are real lists and must stay as lists.
 - original_fragment: must be an exact excerpt from the slide text. For flatten_bullets, include the full group of bullets to flatten.
 
 slide_type values:
@@ -27,6 +28,8 @@ Approve only if ALL of the following are true:
 - The slide_type is well supported by the slide text.
 - The title is correct or null for a good reason.
 - is_continuation is justified by the slide text.
+- key_concepts may be present and should be judged only for correctness, relevance, and overreach. Do NOT reject a review merely because key_concepts is non-empty.
+- summary may be present for content slides and should be judged only for correctness, faithfulness, and overreach. Do NOT reject a review merely because summary is present.
 - Every action is clearly supported by the slide text.
 - Every original_fragment is an exact excerpt from the provided slide text.
 - The action list is minimal: no speculative, redundant, or overly broad edits.
@@ -37,6 +40,12 @@ Reject if ANY of the following happen:
 - An original_fragment is not exact.
 - The review misses an obvious structural issue that should have been captured by an existing action type.
 - The review classification is inconsistent with the slide.
+
+Allowed slide_type values are ONLY:
+- content
+- image_description
+- introduction
+- course_info
 
 Allowed action types are ONLY:
 - insert_connectivity
@@ -52,7 +61,9 @@ Return JSON with:
 
 Rules for retry_instruction:
 - Do not invent new action names.
-- Only refer to the allowed action types above, or to slide_type/title/is_continuation/original_fragment correctness.
+- Do not invent new slide_type names.
+- Only refer to the allowed action types above, the allowed slide_type values above, or to title/is_continuation/original_fragment correctness.
+- Do not tell the checker to remove key_concepts or summary solely because those fields exist.
 - Prefer instructions like remove an unsupported action, keep the action list empty, correct the title, correct continuation, or replace one allowed action type with another allowed action type when justified.
 
 Be conservative. If unsure, reject and explain why."""
