@@ -28,9 +28,9 @@ src/
   title_editor.py        Heading hierarchy editor
   quality_checker.py     Final document quality reviewer
   models.py              Pydantic models for structured LLM output
-  normalizer.py          Text normalization utilities
   utilities/
     model_config.py      Stage-specific model and RPM configuration
+    normalizer.py        Shared text normalization helpers
     prompts.py           All LLM system prompts
     rate_limit.py        Shared per-model pacing helper
 cache/                   Intermediate and final outputs per PDF

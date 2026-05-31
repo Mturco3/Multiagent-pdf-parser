@@ -5,8 +5,8 @@ from pydantic_ai import Agent
 from pydantic_ai.exceptions import ModelHTTPError
 
 from .models import ReviewApprovalResponse, SlideReview, SlideReviewResponse, SlideType
-from .normalizer import normalize
 from .utilities.model_config import CHECKER_MODEL, CHECKER_MODEL_RPM, REVIEWER_MODEL, REVIEWER_MODEL_RPM, WINDOW_SECONDS
+from .utilities.normalizer import normalize
 from .utilities.prompts import CHECKER_REVIEWER_PROMPT, CHECKER_SYSTEM_PROMPT
 from .utilities.rate_limit import RequestPacer
 

@@ -1,7 +1,7 @@
 import re
 
-PERSONAL_PRONOUNS = re.compile(r'\b(we|you|our|your)\b', re.IGNORECASE)
-BULLET_PREFIX = re.compile(r'^\s*[•\-\*\u2013\u2014]\s*')
+PERSONAL_PRONOUNS = re.compile(r"\b(we|you|our|your)\b", re.IGNORECASE)
+BULLET_PREFIX = re.compile(r"^\s*[â€¢\-\*\u2013\u2014]\s*")
 
 
 def normalize(text: str) -> str:
@@ -9,12 +9,12 @@ def normalize(text: str) -> str:
     lines = text.splitlines()
     cleaned = []
     for line in lines:
-        line = BULLET_PREFIX.sub('', line)
-        line = re.sub(r'  +', ' ', line)
+        line = BULLET_PREFIX.sub("", line)
+        line = re.sub(r"  +", " ", line)
         line = line.strip()
         if line:
             cleaned.append(line)
-    return '\n'.join(cleaned)
+    return "\n".join(cleaned)
 
 
 def has_personal_pronouns(text: str) -> bool:

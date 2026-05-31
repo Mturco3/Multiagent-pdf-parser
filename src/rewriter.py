@@ -4,8 +4,8 @@ from pydantic_ai import Agent
 from pydantic_ai.exceptions import ModelHTTPError
 
 from .models import SlideReview, SlideRewrite, SlideType
-from .normalizer import normalize
 from .utilities.model_config import REWRITER_MODEL, REWRITER_MODEL_RPM, WINDOW_SECONDS
+from .utilities.normalizer import normalize
 from .utilities.prompts import REWRITER_SYSTEM_PROMPT
 from .utilities.rate_limit import RequestPacer
 
