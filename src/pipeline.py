@@ -105,6 +105,31 @@ class Pipeline:
 
         print(f"[saved] {len(slides)} slides to {directory}/")
 
+    def save_slide_json(self, directory: str, slide: SlideRewrite):
+        """Persist one slide artifact immediately so long stages can resume safely."""
+        dir_path = os.path.join(self.cache_dir, directory)
+        os.makedirs(dir_path, exist_ok=True)
+        filename = f"slide_{slide.slide_number:03d}.json"
+        filepath = os.path.join(dir_path, filename)
+        with open(filepath, "w", encoding="utf-8") as file_handle:
+            json.dump(slide.model_dump(), file_handle, indent=2, ensure_ascii=False)
+
+    def load_slide_json(self, directory: str, slide_number: int) -> SlideRewrite | None:
+        """Load one cached slide artifact when it matches the current schema."""
+        dir_path = os.path.join(self.cache_dir, directory)
+        filepath = os.path.join(dir_path, f"slide_{slide_number:03d}.json")
+        if not os.path.exists(filepath):
+            return None
+
+        with open(filepath, encoding="utf-8") as file_handle:
+            payload = json.load(file_handle)
+
+        if "rewrite_mode" not in payload:
+            os.remove(filepath)
+            return None
+
+        return SlideRewrite(**payload)
+
     def load_slide_jsons(self, directory: str, expected_slide_numbers: list[int]) -> list[SlideRewrite] | None:
         """Load cached slide artifacts only when the file set matches exactly."""
         dir_path = os.path.join(self.cache_dir, directory)
@@ -316,21 +341,41 @@ class Pipeline:
         print("=" * 60)
 
         formatter = MathFormatter()
-        updated_slides, responses = formatter.format_all(slides)
-        self.save_slide_jsons("math", updated_slides)
-
         math_dir = os.path.join(self.cache_dir, "math_replacements")
         os.makedirs(math_dir, exist_ok=True)
-        self.clear_json_files(math_dir)
+        math_cache_dir = os.path.join(self.cache_dir, "math")
+        os.makedirs(math_cache_dir, exist_ok=True)
 
-        for slide, response in zip(updated_slides, responses):
-            if not response.replacements:
+        valid_math_filenames = {f"slide_{slide.slide_number:03d}.json" for slide in slides}
+        for filename in os.listdir(math_cache_dir):
+            if filename not in valid_math_filenames:
+                os.remove(os.path.join(math_cache_dir, filename))
+
+        valid_replacement_filenames = {f"slide_{slide.slide_number:03d}_replacements.json" for slide in slides}
+        for filename in os.listdir(math_dir):
+            if filename not in valid_replacement_filenames:
+                os.remove(os.path.join(math_dir, filename))
+
+        updated_slides: list[SlideRewrite] = []
+        for slide in slides:
+            cached_slide = self.load_slide_json("math", slide.slide_number)
+            if cached_slide is not None:
+                print(f"[slide {slide.slide_number:03d}] cached math")
+                updated_slides.append(cached_slide)
                 continue
+
+            updated_slide, response = formatter.format_slide(slide)
+            self.save_slide_json("math", updated_slide)
 
             filename = f"slide_{slide.slide_number:03d}_replacements.json"
             filepath = os.path.join(math_dir, filename)
-            with open(filepath, "w", encoding="utf-8") as file_handle:
-                json.dump(response.model_dump(), file_handle, indent=2, ensure_ascii=False)
+            if response.replacements:
+                with open(filepath, "w", encoding="utf-8") as file_handle:
+                    json.dump(response.model_dump(), file_handle, indent=2, ensure_ascii=False)
+            elif os.path.exists(filepath):
+                os.remove(filepath)
+
+            updated_slides.append(updated_slide)
 
         return updated_slides
 
