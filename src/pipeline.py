@@ -12,6 +12,12 @@ from .title_editor import TitleEditor
 from .transcriber import CACHE_DIR, Transcriber
 from .utilities.model_config import WINDOW_SECONDS, get_model_summary
 
+REWRITE_CACHE_MODES = {
+    "rewrite_review_v2",
+    "deterministic_passthrough_v2",
+    "introduction_heading_v2",
+}
+
 
 class Pipeline:
     """Orchestrates the full flow from PDF input to final markdown output."""
@@ -125,7 +131,7 @@ class Pipeline:
         with open(filepath, encoding="utf-8") as file_handle:
             payload = json.load(file_handle)
 
-        if "rewrite_mode" not in payload:
+        if payload.get("rewrite_mode") not in REWRITE_CACHE_MODES:
             os.remove(filepath)
             return None
 
@@ -152,7 +158,7 @@ class Pipeline:
             filepath = os.path.join(dir_path, filename)
             with open(filepath, encoding="utf-8") as file_handle:
                 payload = json.load(file_handle)
-                if "rewrite_mode" not in payload:
+                if payload.get("rewrite_mode") not in REWRITE_CACHE_MODES:
                     return None
                 slides.append(SlideRewrite(**payload))
 

@@ -6,7 +6,7 @@ from pydantic_ai.exceptions import ModelHTTPError
 
 from .models import ReviewApprovalResponse, SlideReview, SlideReviewResponse, SlideType
 from .utilities.model_config import CHECKER_MODEL, CHECKER_MODEL_RPM, REVIEWER_MODEL, REVIEWER_MODEL_RPM, WINDOW_SECONDS
-from .utilities.normalizer import normalize
+from .utilities.normalizer import looks_like_raw_slide_block, normalize
 from .utilities.prompts import CHECKER_REVIEWER_PROMPT, CHECKER_SYSTEM_PROMPT
 from .utilities.rate_limit import RequestPacer
 
@@ -91,7 +91,8 @@ class LLMChecker:
 
     def build_checker_prompt(self, normalized_text: str, retry_instruction: str | None = None) -> str:
         """Build the checker prompt, optionally including reviewer feedback from a failed attempt."""
-        prompt = f"Slide text:\n\n{normalized_text}"
+        raw_block_hint = "yes" if looks_like_raw_slide_block(normalized_text) else "no"
+        prompt = f"Slide text:\n\n{normalized_text}\n\nStructural hints:\n- raw_slide_block_detected: {raw_block_hint}"
         if retry_instruction:
             prompt += (
                 "\n\nReviewer feedback from the previous attempt:\n"

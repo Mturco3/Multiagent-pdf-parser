@@ -56,6 +56,14 @@ class ReviewApprovalResponse(BaseModel):
     retry_instruction: str | None
 
 
+class RewriteApprovalResponse(BaseModel):
+    """Reviewer verdict on whether a rewritten slide body and title are acceptable."""
+    approved: bool
+    reason: str | None
+    retry_instruction: str | None
+    keep_title: bool = True
+
+
 class HeadingAction(str, Enum):
     """What to do with a heading in the document."""
     KEEP = "keep"
@@ -104,7 +112,7 @@ class SlideRewrite(BaseModel):
     title: str | None
     is_continuation: bool
     text: str
-    rewrite_mode: str = "approved_actions_only"
+    rewrite_mode: str = "rewrite_review_v2"
 
 
 class MathReplacement(BaseModel):

@@ -3,13 +3,15 @@ import time
 from pydantic_ai import Agent
 from pydantic_ai.exceptions import ModelHTTPError
 
-from .models import SlideReview, SlideRewrite, SlideType
-from .utilities.model_config import REWRITER_MODEL, REWRITER_MODEL_RPM, WINDOW_SECONDS
+from .models import RewriteApprovalResponse, SlideReview, SlideRewrite, SlideType
+from .utilities.model_config import REWRITER_MODEL, REWRITER_MODEL_RPM, REVIEWER_MODEL, REVIEWER_MODEL_RPM, WINDOW_SECONDS
 from .utilities.normalizer import normalize
-from .utilities.prompts import REWRITER_SYSTEM_PROMPT
+from .utilities.prompts import REWRITER_SYSTEM_PROMPT, REWRITE_REVIEWER_PROMPT
 from .utilities.rate_limit import RequestPacer
 
 rewriter_agent = Agent(REWRITER_MODEL, output_type=str, instructions=REWRITER_SYSTEM_PROMPT, model_settings={"temperature": 0})
+rewrite_reviewer_agent = Agent(REVIEWER_MODEL, output_type=RewriteApprovalResponse, instructions=REWRITE_REVIEWER_PROMPT, model_settings={"temperature": 0})
+MAX_REWRITE_ATTEMPTS = 2
 MAX_MODEL_RETRIES = 3
 TRANSIENT_STATUS_CODES = {429, 503}
 
@@ -47,14 +49,14 @@ class LLMRewriter:
             return float(WINDOW_SECONDS)
         return 30.0
 
-    def run_rewriter_request(self, prompt: str) -> str:
-        """Call the rewrite model with deterministic pacing and transient retries."""
+    def run_with_transient_retry(self, request_name: str, model_name: str, rpm: int, runner, prompt: str):
+        """Call a rewrite-stage model with deterministic pacing and transient retries."""
         attempt = 0
         while True:
-            self.pacer.wait_for_capacity(REWRITER_MODEL, REWRITER_MODEL_RPM)
+            self.pacer.wait_for_capacity(model_name, rpm)
             try:
-                result = rewriter_agent.run_sync(prompt)
-                self.pacer.mark_request(REWRITER_MODEL)
+                result = runner(prompt)
+                self.pacer.mark_request(model_name)
                 return result.output
             except ModelHTTPError as error:
                 if error.status_code not in TRANSIENT_STATUS_CODES or attempt >= MAX_MODEL_RETRIES - 1:
@@ -62,16 +64,31 @@ class LLMRewriter:
 
                 delay = self.get_retry_delay(error)
                 attempt += 1
-                print(f"rewriter transient error {error.status_code} - retrying in {delay:.1f}s ({attempt}/{MAX_MODEL_RETRIES})...")
+                print(f"{request_name} transient error {error.status_code} - retrying in {delay:.1f}s ({attempt}/{MAX_MODEL_RETRIES})...")
                 time.sleep(delay)
-                self.pacer.reset(REWRITER_MODEL, REWRITER_MODEL_RPM)
+                self.pacer.reset(model_name, rpm)
+
+    def run_rewriter_request(self, prompt: str) -> str:
+        """Call the rewrite model with deterministic pacing and transient retries."""
+        return self.run_with_transient_retry("rewriter", REWRITER_MODEL, REWRITER_MODEL_RPM, rewriter_agent.run_sync, prompt)
+
+    def run_rewrite_review_request(self, prompt: str) -> RewriteApprovalResponse:
+        """Call the rewrite reviewer model with deterministic pacing and transient retries."""
+        return self.run_with_transient_retry("rewrite-reviewer", REVIEWER_MODEL, REVIEWER_MODEL_RPM, rewrite_reviewer_agent.run_sync, prompt)
 
     def build_introduction_output(self, review: SlideReview) -> SlideRewrite | None:
         """Return a heading-only output for introduction slides when possible."""
         if not review.title:
             return None
 
-        return SlideRewrite(slide_number=review.slide_number, slide_type=review.slide_type.value, title=review.title, is_continuation=False, text="")
+        return SlideRewrite(
+            slide_number=review.slide_number,
+            slide_type=review.slide_type.value,
+            title=review.title,
+            is_continuation=False,
+            text="",
+            rewrite_mode="introduction_heading_v2",
+        )
 
     def extract_body_text(self, slide_text: str, review: SlideReview) -> str:
         """Prepare deterministic slide body text without title or trailing page number noise."""
@@ -93,7 +110,24 @@ class LLMRewriter:
             title=review.title,
             is_continuation=review.is_continuation,
             text=self.extract_body_text(slide_text, review),
+            rewrite_mode="deterministic_passthrough_v2",
         )
+
+    def review_title_support(self, slide_text: str, title: str | None, rewritten_text: str) -> RewriteApprovalResponse:
+        """Ask the reviewer whether the rewritten body is acceptable and whether the title is supported."""
+        prompt = (
+            f"Original normalized slide text:\n\n{normalize(slide_text)}\n\n"
+            f"Proposed title: {title or '(no title)'}\n\n"
+            f"Rewritten slide body:\n\n{rewritten_text}"
+        )
+        return self.run_rewrite_review_request(prompt)
+
+    def finalize_title(self, review: SlideReview, title_review: RewriteApprovalResponse) -> str | None:
+        """Drop unsupported titles deterministically after the reviewer verdict."""
+        if review.title and not title_review.keep_title:
+            print(f"[slide {review.slide_number:03d}] dropping unsupported title")
+            return None
+        return review.title
 
     def rewrite_one(self, slide_text: str, review: SlideReview, previous_paragraph: str | None = None) -> SlideRewrite | None:
         """Rewrite one slide or skip it when the slide should not be sent to the LLM."""
@@ -107,30 +141,55 @@ class LLMRewriter:
 
         if not review.reviewer_approved:
             print(f"[slide {review.slide_number:03d}] review not approved; preserving extracted body text")
-            return self.build_passthrough_output(slide_text, review)
+            fallback = self.build_passthrough_output(slide_text, review)
+            if fallback.title and fallback.text:
+                title_review = self.review_title_support(slide_text, review.title, fallback.text)
+                return fallback.model_copy(update={"title": self.finalize_title(review, title_review)})
+            return fallback
 
         if not review.actions:
             print(f"[slide {review.slide_number:03d}] no approved actions; preserving extracted body text")
-            return self.build_passthrough_output(slide_text, review)
+            fallback = self.build_passthrough_output(slide_text, review)
+            if fallback.title and fallback.text:
+                title_review = self.review_title_support(slide_text, review.title, fallback.text)
+                return fallback.model_copy(update={"title": self.finalize_title(review, title_review)})
+            return fallback
 
         body_text = self.extract_body_text(slide_text, review)
         actions_text = "\n".join(f"- {action.action.value}: \"{action.original_fragment}\"" for action in review.actions)
+        retry_instruction: str | None = None
 
-        prompt = f"Slide title: {review.title or '(no title)'}\n\nOriginal slide text:\n\n{body_text}\n\nActions to apply:\n{actions_text}"
-        if previous_paragraph:
-            prompt += f"\n\nPrevious paragraph (for transition context only - do NOT include this content in your output):\n{previous_paragraph}"
+        for attempt in range(1, MAX_REWRITE_ATTEMPTS + 1):
+            prompt = f"Slide title: {review.title or '(no title)'}\n\nOriginal slide text:\n\n{body_text}\n\nActions to apply:\n{actions_text}"
+            if previous_paragraph:
+                prompt += f"\n\nPrevious paragraph (for transition context only - do NOT include this content in your output):\n{previous_paragraph}"
+            if retry_instruction:
+                prompt += f"\n\nReviewer feedback from the previous attempt:\n{retry_instruction}"
 
-        print(f"[slide {review.slide_number:03d}] rewriting ({len(review.actions)} approved action(s))...")
-        rewritten_text = self.run_rewriter_request(prompt)
-        print(f"[slide {review.slide_number:03d}] done")
+            print(f"[slide {review.slide_number:03d}] rewriting attempt {attempt}/{MAX_REWRITE_ATTEMPTS} ({len(review.actions)} approved action(s))...")
+            rewritten_text = self.run_rewriter_request(prompt)
+            title_review = self.review_title_support(slide_text, review.title, rewritten_text)
 
-        return SlideRewrite(
-            slide_number=review.slide_number,
-            slide_type=review.slide_type.value,
-            title=review.title,
-            is_continuation=review.is_continuation,
-            text=rewritten_text,
-        )
+            if title_review.approved:
+                print(f"[slide {review.slide_number:03d}] done")
+                return SlideRewrite(
+                    slide_number=review.slide_number,
+                    slide_type=review.slide_type.value,
+                    title=self.finalize_title(review, title_review),
+                    is_continuation=review.is_continuation,
+                    text=rewritten_text,
+                    rewrite_mode="rewrite_review_v2",
+                )
+
+            retry_instruction = title_review.retry_instruction or title_review.reason or "Preserve the original content more faithfully and remove raw slide artifacts."
+            print(f"[slide {review.slide_number:03d}] rewrite rejected - {retry_instruction}")
+
+        print(f"[slide {review.slide_number:03d}] rewrite not approved; falling back to deterministic passthrough")
+        fallback = self.build_passthrough_output(slide_text, review)
+        if fallback.title and fallback.text:
+            fallback_review = self.review_title_support(slide_text, review.title, fallback.text)
+            return fallback.model_copy(update={"title": self.finalize_title(review, fallback_review)})
+        return fallback
 
     def rewrite_all(self, slides: list[tuple[int, str]], reviews: list[SlideReview]) -> list[SlideRewrite]:
         """Rewrite all slides that should appear in the final document."""

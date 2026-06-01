@@ -7,14 +7,15 @@ Rules:
 - key_concepts: list of main technical concepts introduced or used (empty list if none).
 - summary: one sentence for content slides, null for introduction/course_info/image_description.
 - actions: only flag issues that are clearly present. Empty list if none.
+- If the slide text shows obvious OCR-style or slide-layout fragmentation, such as many short stacked lines, broken bullet glyphs, or a heading line immediately followed by wrapped bullet fragments, treat that as a real structural issue rather than ignoring it.
 - For remove_personal_pronouns: only flag a fragment when the slide uses first- or second-person wording or possessives that should be rewritten impersonally.
-- For insert_connectivity: only flag consecutive sentences/bullets that are logically sequential or causally linked.
-- For flatten_bullets: flag only a real bullet-like or numbered list group that is present in the slide text. Use it when those bullets are NOT a true enumeration of distinct items, but rather a sequence of cohesive sentences or thoughts that were formatted as bullets only for slide layout reasons. Also use it for bullet lists where each item is a short phrase (not a full sentence with its own explanation) listing consequences, effects, properties, or characteristics of the same concept — these read more naturally as a comma-separated clause within a flowing paragraph. Do NOT flag ordinary paragraphs, multi-paragraph prose, tables, or table-like text. Do NOT flag bullets that enumerate actual distinct elements with substantive definitions or explanations after each item — those are real lists and must stay as lists.
+- For insert_connectivity: only flag consecutive sentences or bullets that are logically sequential or causally linked.
+- For flatten_bullets: flag only a real bullet-like or numbered list group that is present in the slide text. Use it when those bullets are NOT a true enumeration of distinct items, but rather a sequence of cohesive sentences or thoughts that were formatted as bullets only for slide layout reasons. Also use it for bullet lists where each item is a short phrase (not a full sentence with its own explanation) listing consequences, effects, properties, or characteristics of the same concept - these read more naturally as a comma-separated clause within a flowing paragraph. Use it as well when a broken slide block contains a short stacked heading immediately followed by wrapped bullet fragments that belong to one continuous note block. Do NOT flag ordinary paragraphs, multi-paragraph prose, tables, or table-like text. Do NOT flag bullets that enumerate actual distinct elements with substantive definitions or explanations after each item - those are real lists and must stay as lists.
 - original_fragment: must be an exact excerpt from the slide text. For flatten_bullets, include the full group of bullets to flatten.
 
 slide_type values:
 - "content": normal lecture content slide
-- "image_description": slide that is mainly a figure/diagram with little text
+- "image_description": slide that is mainly a figure or diagram with little text
 - "introduction": title slide or section intro with no substantive content
 - "course_info": logistics, syllabus, deadlines, references, reading lists, slides listing assigned readings or topics for the day, or slides showing the university name, course title, instructor name, or contact information"""
 
@@ -62,11 +63,36 @@ Return JSON with:
 Rules for retry_instruction:
 - Do not invent new action names.
 - Do not invent new slide_type names.
-- Only refer to the allowed action types above, the allowed slide_type values above, or to title/is_continuation/original_fragment correctness.
+- Only refer to the allowed action types above, the allowed slide_type values above, or to title, is_continuation, or original_fragment correctness.
 - Do not tell the checker to remove key_concepts or summary solely because those fields exist.
 - Prefer instructions like remove an unsupported action, keep the action list empty, correct the title, correct continuation, or replace one allowed action type with another allowed action type when justified.
 
 Be conservative. If unsure, reject and explain why."""
+
+REWRITE_REVIEWER_PROMPT = """You are a strict reviewer for a rewritten lecture-slide note. You receive:
+1. The normalized original slide text.
+2. The proposed section title, if any.
+3. The rewritten slide body.
+
+Your task is to decide whether the rewrite is acceptable and whether the title should be kept.
+
+Approve only if ALL of the following are true:
+- The rewritten body preserves the information from the original slide text.
+- The rewritten body does not contain obvious raw slide artifacts such as broken bullet glyphs, stacked one-word lines, or a duplicate heading fragment that should have been absorbed into prose or list structure.
+- If a title is present, the rewritten body clearly covers that titled concept or topic.
+
+Return JSON with:
+- approved: true or false
+- reason: short explanation
+- retry_instruction: if approved is false, one concise instruction for the next rewrite attempt; otherwise null
+- keep_title: true if the title is supported by the rewritten body, false if the body is acceptable but the title should be dropped
+
+Rules:
+- If the body is acceptable but the title is unsupported, set approved to true and keep_title to false.
+- If the body still looks like raw slide text, reject it.
+- Do not ask for new content that is not present in the original slide.
+- Keep retry_instruction short and actionable, for example: restore list structure, remove the leftover slide heading fragment from the body, preserve more original wording, or make the opening sentence self-contained.
+- Be conservative: if unsure that the title is supported, set keep_title to false."""
 
 REWRITER_SYSTEM_PROMPT = """You are a university notes editor. You receive the original text of a lecture slide, a list of suggested actions, and optionally the previous paragraph for context. Your job is to rewrite the slide text into polished, readable university notes.
 
@@ -76,18 +102,19 @@ CRITICAL: The previous paragraph is provided ONLY so you can write a smooth tran
 CRITICAL: The actions were already reviewed and approved. Only apply the listed actions. If an action is not listed, do not introduce that change.
 
 Apply each action precisely:
-- insert_connectivity: join the flagged consecutive sentences/bullets into fluent prose with a transitional phrase.
+- insert_connectivity: join the flagged consecutive sentences or bullets into fluent prose with a transitional phrase.
 - remove_personal_pronouns: rewrite the flagged sentence in impersonal form.
-- flatten_bullets: convert the flagged bullet group into a fluid paragraph, preserving all content and wording. Keep the same words — only remove the bullet formatting and add minimal connective tissue to make it read as prose.
+- flatten_bullets: convert the flagged bullet group into a fluid paragraph, preserving all content and wording. Keep the same words - only remove the bullet formatting and add minimal connective tissue to make it read as prose.
 - define_acronym: expand the acronym at its first use on this slide.
 - incomplete_sentence: complete the fragment so it reads as a full sentence, using only context from the slide.
 
 Additional rewriting rules (apply always, regardless of actions):
 - Interrogative sentences: rephrase all questions as declarative statements while preserving their meaning.
-- Introductory framing: the opening sentence should naturally introduce the topic without repeating the slide title verbatim. Keep it brief — one short sentence at most. Do not write elaborate multi-sentence introductions.
+- Introductory framing: the opening sentence should naturally introduce the topic without repeating the slide title verbatim. Keep it brief - one short sentence at most. Do not write elaborate multi-sentence introductions.
 - True enumerations: when the slide lists distinct items, types, categories, options, or examples (even just two items) with substantive definitions or explanations, preserve them as a properly structured list. NEVER collapse a real enumeration into a single paragraph. If items are labeled or named (e.g. "Horizontal compatibility", "Vertical compatibility"), they must remain as separate list entries.
-- After a title: the first sentence of a new section must NOT use demonstrative references like "these", "this", "those", "such" that point to something before the title. The paragraph must be self-contained.
+- After a title: the first sentence of a new section must NOT use demonstrative references like "these", "this", "those", or "such" that point to something before the title. The paragraph must be self-contained.
 - Readability: light rewrites to fix run-on sentences, split overly long clauses, or clarify awkward phrasing are allowed, as long as no content is lost.
+- Raw slide artifacts: if the text contains stacked short lines, a leftover slide-heading fragment, or broken bullet wrapping, convert it into ordinary prose or a proper list while preserving the content.
 - Do NOT add new information that is not in the original text.
 - If the action list is empty, return the slide text unchanged.
 - If a previous paragraph is provided, ensure the rewritten text flows naturally from it, but only within the same section (not across title boundaries).
@@ -99,7 +126,7 @@ QUALITY_CHECKER_PROMPT = """You are a quality reviewer for university lecture no
 Review the document and flag any issues found. For each issue, provide the exact problematic text and what is wrong with it.
 
 Issue types to look for:
-- list_collapsed: a real enumeration of distinct items WITH substantive definitions or explanations was incorrectly merged into a single paragraph. Named items, types, categories, or options that each have their own description should be listed separately. Do NOT flag sentences that list short consequences, effects, or properties as a comma-separated clause — those are intentionally written as flowing prose.
+- list_collapsed: a real enumeration of distinct items WITH substantive definitions or explanations was incorrectly merged into a single paragraph. Named items, types, categories, or options that each have their own description should be listed separately. Do NOT flag sentences that list short consequences, effects, or properties as a comma-separated clause - those are intentionally written as flowing prose.
 - excessive_introduction: an introductory sentence that is too long, too elaborate, or adds information not present in the content that follows.
 - dangling_reference: a paragraph after a heading uses "these", "this", "those", or "such" to reference content from before the heading, making it read as if it depends on context the reader hasn't seen yet.
 - content_lost: information from the original that appears to be missing or significantly altered.
@@ -116,7 +143,7 @@ Fix types:
 - list_collapsed: restore the enumeration as a properly formatted markdown list with each item on its own line.
 - excessive_introduction: trim the introduction to one brief sentence.
 - dangling_reference: rewrite the sentence to be self-contained without backward references.
-- content_lost: cannot be fixed without the original — flag only.
+- content_lost: cannot be fixed without the original - flag only.
 - repetition: return an empty string to remove the duplicate.
 - awkward_flow: lightly rephrase the transition for natural flow.
 
