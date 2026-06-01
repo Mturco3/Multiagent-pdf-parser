@@ -19,8 +19,8 @@ class Transcriber:
 
         print("=" * 60)
         print("PDF Transcriber")
-        print(f"Input : {self.pdf_path}")
-        print(f"Cache : {output_dir}")
+        print(f"Input: {self.pdf_path}")
+        print(f"Cache: {output_dir}")
         print("=" * 60)
 
         pdf_document = fitz.open(self.pdf_path)
@@ -30,8 +30,8 @@ class Transcriber:
             slide_number = page_index + 1
             slide_text = page.get_text().strip()
             slide_path = os.path.join(output_dir, f"slide_{slide_number:03d}.txt")
-            with open(slide_path, "w", encoding="utf-8") as f:
-                f.write(slide_text)
+            with open(slide_path, "w", encoding="utf-8") as file_handle:
+                file_handle.write(slide_text)
             print(f"[{slide_number}/{total}] -> {os.path.basename(slide_path)}")
 
         pdf_document.close()

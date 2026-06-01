@@ -1,13 +1,14 @@
 import re
 import time
 
+import httpx
 from pydantic_ai import Agent
 from pydantic_ai.exceptions import ModelHTTPError
 
 from .models import TitleAnalysis, HeadingAction
-from .utilities.model_config import TITLE_MODEL, TITLE_MODEL_RPM, WINDOW_SECONDS
+from .utilities.model_config import TITLE_MODEL, TITLE_MODEL_RPD, TITLE_MODEL_RPM, WINDOW_SECONDS
 from .utilities.prompts import TITLE_IDENTIFIER_PROMPT
-from .utilities.rate_limit import RequestPacer
+from .utilities.rate_limit import DailyQuotaExceededError, RequestPacer
 
 # Identifies heading changes needed in the document
 title_identifier_agent = Agent(
@@ -17,13 +18,15 @@ title_identifier_agent = Agent(
     model_settings={"temperature": 0}
 )
 MAX_MODEL_RETRIES = 3
-TRANSIENT_STATUS_CODES = {429, 503}
+TIMEOUT_RETRY_DELAY_SECONDS = 30.0
+TRANSIENT_STATUS_CODES = {429, 500, 503}
 
 
 class TitleEditor:
     """Identifies heading changes via LLM, then applies them programmatically."""
 
     def __init__(self):
+        """Initialize the title editor with rate-limited model access."""
         self.pacer = RequestPacer(WINDOW_SECONDS)
 
     def get_retry_delay(self, error: ModelHTTPError) -> float:
@@ -57,12 +60,17 @@ class TitleEditor:
         """Call the title model with pacing and transient retry handling."""
         attempt = 0
         while True:
-            self.pacer.wait_for_capacity(TITLE_MODEL, TITLE_MODEL_RPM)
+            self.pacer.acquire_request_slot(TITLE_MODEL, TITLE_MODEL_RPM, TITLE_MODEL_RPD)
             try:
                 result = title_identifier_agent.run_sync(prompt)
-                self.pacer.mark_request(TITLE_MODEL)
                 return result.output
             except ModelHTTPError as error:
+                if error.status_code == 429 and self.pacer.is_daily_quota_error(error.body):
+                    self.pacer.mark_daily_exhausted(TITLE_MODEL, TITLE_MODEL_RPD)
+                    raise DailyQuotaExceededError(
+                        f"Provider daily request quota exhausted for {TITLE_MODEL}. "
+                        "Resume after reset or switch this stage to another model."
+                    ) from error
                 if error.status_code not in TRANSIENT_STATUS_CODES or attempt >= MAX_MODEL_RETRIES - 1:
                     raise
 
@@ -70,7 +78,16 @@ class TitleEditor:
                 attempt += 1
                 print(f"title transient error {error.status_code} - retrying in {delay:.1f}s ({attempt}/{MAX_MODEL_RETRIES})...")
                 time.sleep(delay)
-                self.pacer.reset(TITLE_MODEL, TITLE_MODEL_RPM)
+            except httpx.TimeoutException as error:
+                if attempt >= MAX_MODEL_RETRIES - 1:
+                    raise
+
+                attempt += 1
+                print(
+                    f"title transient timeout - retrying in "
+                    f"{TIMEOUT_RETRY_DELAY_SECONDS:.1f}s ({attempt}/{MAX_MODEL_RETRIES})..."
+                )
+                time.sleep(TIMEOUT_RETRY_DELAY_SECONDS)
 
     def identify(self, document: str) -> TitleAnalysis:
         """Send the document to the LLM to identify all heading changes."""
@@ -91,7 +108,6 @@ class TitleEditor:
                 # Build the new heading
                 heading_text = change.new_text
                 if heading_text is None:
-                    # Extract text from original heading (strip # symbols)
                     heading_text = re.sub(r"^#+\s*", "", change.original_heading)
                 new_heading = "#" * change.new_level + " " + heading_text
                 if new_heading != change.original_heading:

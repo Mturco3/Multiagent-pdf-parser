@@ -1,17 +1,19 @@
 import re
 import time
 
+import httpx
 from pydantic_ai import Agent
 from pydantic_ai.exceptions import ModelHTTPError
 
 from .models import MathReplacementResponse, SlideRewrite
-from .utilities.model_config import MATH_MODEL, MATH_MODEL_RPM, WINDOW_SECONDS
+from .utilities.model_config import MATH_MODEL, MATH_MODEL_RPD, MATH_MODEL_RPM, WINDOW_SECONDS
 from .utilities.prompts import MATH_FORMATTER_PROMPT
-from .utilities.rate_limit import RequestPacer
+from .utilities.rate_limit import DailyQuotaExceededError, RequestPacer
 
 math_agent = Agent(MATH_MODEL, output_type=MathReplacementResponse, instructions=MATH_FORMATTER_PROMPT, model_settings={"temperature": 0})
 MAX_MODEL_RETRIES = 3
-TRANSIENT_STATUS_CODES = {429, 503}
+TIMEOUT_RETRY_DELAY_SECONDS = 30.0
+TRANSIENT_STATUS_CODES = {429, 500, 503}
 
 
 class MathFormatter:
@@ -52,12 +54,17 @@ class MathFormatter:
         """Call the math model with pacing and retries for transient provider failures."""
         attempt = 0
         while True:
-            self.pacer.wait_for_capacity(MATH_MODEL, MATH_MODEL_RPM)
+            self.pacer.acquire_request_slot(MATH_MODEL, MATH_MODEL_RPM, MATH_MODEL_RPD)
             try:
                 result = math_agent.run_sync(prompt)
-                self.pacer.mark_request(MATH_MODEL)
                 return result.output
             except ModelHTTPError as error:
+                if error.status_code == 429 and self.pacer.is_daily_quota_error(error.body):
+                    self.pacer.mark_daily_exhausted(MATH_MODEL, MATH_MODEL_RPD)
+                    raise DailyQuotaExceededError(
+                        f"Provider daily request quota exhausted for {MATH_MODEL}. "
+                        "Resume after reset or switch this stage to another model."
+                    ) from error
                 if error.status_code not in TRANSIENT_STATUS_CODES or attempt >= MAX_MODEL_RETRIES - 1:
                     raise
 
@@ -65,7 +72,16 @@ class MathFormatter:
                 attempt += 1
                 print(f"math transient error {error.status_code} - retrying in {delay:.1f}s ({attempt}/{MAX_MODEL_RETRIES})...")
                 time.sleep(delay)
-                self.pacer.reset(MATH_MODEL, MATH_MODEL_RPM)
+            except httpx.TimeoutException as error:
+                if attempt >= MAX_MODEL_RETRIES - 1:
+                    raise
+
+                attempt += 1
+                print(
+                    f"math transient timeout - retrying in "
+                    f"{TIMEOUT_RETRY_DELAY_SECONDS:.1f}s ({attempt}/{MAX_MODEL_RETRIES})..."
+                )
+                time.sleep(TIMEOUT_RETRY_DELAY_SECONDS)
 
     def apply_replacement(self, text: str, original_text: str, latex: str) -> tuple[str, bool]:
         """Replace one standalone math fragment without interpreting LaTeX escapes."""

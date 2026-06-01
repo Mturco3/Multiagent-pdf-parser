@@ -1,21 +1,25 @@
 import time
 
+import httpx
 from pydantic_ai import Agent
 from pydantic_ai.exceptions import ModelHTTPError
 
 from .models import QualityReport, IssueType
 from .utilities.model_config import (
     QUALITY_FIXER_MODEL,
+    QUALITY_FIXER_MODEL_RPD,
     QUALITY_FIXER_MODEL_RPM,
     QUALITY_IDENTIFIER_MODEL,
+    QUALITY_IDENTIFIER_MODEL_RPD,
     QUALITY_IDENTIFIER_MODEL_RPM,
     WINDOW_SECONDS,
 )
 from .utilities.prompts import QUALITY_CHECKER_PROMPT, QUALITY_FIXER_PROMPT
-from .utilities.rate_limit import RequestPacer
+from .utilities.rate_limit import DailyQuotaExceededError, RequestPacer
 
 MAX_MODEL_RETRIES = 3
-TRANSIENT_STATUS_CODES = {429, 503}
+TIMEOUT_RETRY_DELAY_SECONDS = 30.0
+TRANSIENT_STATUS_CODES = {429, 500, 503}
 
 # Identifies quality issues in the document
 quality_identifier_agent = Agent(
@@ -38,6 +42,7 @@ class QualityChecker:
     """Identifies quality issues via LLM, then fixes them with targeted LLM calls."""
 
     def __init__(self):
+        """Initialize the quality checker with rate-limited model access."""
         self.pacer = RequestPacer(WINDOW_SECONDS)
 
     def get_retry_delay(self, error: ModelHTTPError) -> float:
@@ -67,16 +72,21 @@ class QualityChecker:
             return float(WINDOW_SECONDS)
         return 30.0
 
-    def run_with_transient_retry(self, request_name: str, model_name: str, rpm: int, runner, prompt: str):
+    def run_with_transient_retry(self, request_name: str, model_name: str, rpm: int, rpd: int, runner, prompt: str):
         """Retry transient provider failures with backoff while keeping prompts deterministic."""
         attempt = 0
         while True:
-            self.pacer.wait_for_capacity(model_name, rpm)
+            self.pacer.acquire_request_slot(model_name, rpm, rpd)
             try:
                 result = runner(prompt)
-                self.pacer.mark_request(model_name)
                 return result
             except ModelHTTPError as error:
+                if error.status_code == 429 and self.pacer.is_daily_quota_error(error.body):
+                    self.pacer.mark_daily_exhausted(model_name, rpd)
+                    raise DailyQuotaExceededError(
+                        f"Provider daily request quota exhausted for {model_name}. "
+                        "Resume after reset or switch this stage to another model."
+                    ) from error
                 if error.status_code not in TRANSIENT_STATUS_CODES or attempt >= MAX_MODEL_RETRIES - 1:
                     raise
 
@@ -84,7 +94,16 @@ class QualityChecker:
                 attempt += 1
                 print(f"{request_name} transient error {error.status_code} - retrying in {delay:.1f}s ({attempt}/{MAX_MODEL_RETRIES})...")
                 time.sleep(delay)
-                self.pacer.reset(model_name, rpm)
+            except httpx.TimeoutException as error:
+                if attempt >= MAX_MODEL_RETRIES - 1:
+                    raise
+
+                attempt += 1
+                print(
+                    f"{request_name} transient timeout - retrying in "
+                    f"{TIMEOUT_RETRY_DELAY_SECONDS:.1f}s ({attempt}/{MAX_MODEL_RETRIES})..."
+                )
+                time.sleep(TIMEOUT_RETRY_DELAY_SECONDS)
 
     def identify(self, document: str) -> QualityReport:
         """Send the document to the LLM for quality review."""
@@ -93,6 +112,7 @@ class QualityChecker:
             "quality-identifier",
             QUALITY_IDENTIFIER_MODEL,
             QUALITY_IDENTIFIER_MODEL_RPM,
+            QUALITY_IDENTIFIER_MODEL_RPD,
             quality_identifier_agent.run_sync,
             f"Document:\n\n{document}",
         )
@@ -135,6 +155,7 @@ class QualityChecker:
                     "quality-fixer",
                     QUALITY_FIXER_MODEL,
                     QUALITY_FIXER_MODEL_RPM,
+                    QUALITY_FIXER_MODEL_RPD,
                     quality_fixer_agent.run_sync,
                     prompt,
                 )

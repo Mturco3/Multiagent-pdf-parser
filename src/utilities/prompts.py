@@ -14,9 +14,9 @@ Rules:
 - original_fragment: must be an exact excerpt from the slide text. For flatten_bullets, include the full group of bullets to flatten.
 
 slide_type values:
-- "content": normal lecture content slide
+- "content": normal lecture content slide with substantive body text beyond just a title
 - "image_description": slide that is mainly a figure or diagram with little text
-- "introduction": title slide or section intro with no substantive content
+- "introduction": title slide or section intro with no substantive content. A slide that contains ONLY a title line (or a title with a subtitle) and no body text must be classified as introduction, not content.
 - "course_info": logistics, syllabus, deadlines, references, reading lists, slides listing assigned readings or topics for the day, or slides showing the university name, course title, instructor name, or contact information"""
 
 CHECKER_REVIEWER_PROMPT = """You are a strict reviewer for a slide-edit planning system. You receive:
@@ -33,14 +33,12 @@ Approve only if ALL of the following are true:
 - summary may be present for content slides and should be judged only for correctness, faithfulness, and overreach. Do NOT reject a review merely because summary is present.
 - Every action is clearly supported by the slide text.
 - Every original_fragment is an exact excerpt from the provided slide text.
-- The action list is minimal: no speculative, redundant, or overly broad edits.
+- The action list is reasonable: no speculative or unsupported edits. Multiple actions on overlapping text are acceptable when each action addresses a different concern (e.g. flatten_bullets on a group AND insert_connectivity within that group).
 
 Reject if ANY of the following happen:
-- The slide is being over-edited.
 - An action is unsupported by the text.
 - An original_fragment is not exact.
-- The review misses an obvious structural issue that should have been captured by an existing action type.
-- The review classification is inconsistent with the slide.
+- The review classification is inconsistent with the slide (e.g. a slide with only a title and no body text classified as content instead of introduction).
 
 Allowed slide_type values are ONLY:
 - content
@@ -109,8 +107,9 @@ Apply each action precisely:
 - incomplete_sentence: complete the fragment so it reads as a full sentence, using only context from the slide.
 
 Additional rewriting rules (apply always, regardless of actions):
-- Interrogative sentences: rephrase all questions as declarative statements while preserving their meaning.
-- Introductory framing: the opening sentence should naturally introduce the topic without repeating the slide title verbatim. Keep it brief - one short sentence at most. Do not write elaborate multi-sentence introductions.
+- Preserve the original tone and register of the lecture. Do not over-formalize conversational or pedagogical language.
+- Questions: keep rhetorical or pedagogical questions as-is. Only rephrase a question as a declarative statement when it is clearly a factual question that reads awkwardly in notes form.
+- Introductory framing: do NOT add an opening sentence that is not in the original text. If the slide starts directly with content, start with that content. Only add a brief introductory clause if the original text itself frames the topic.
 - True enumerations: when the slide lists distinct items, types, categories, options, or examples (even just two items) with substantive definitions or explanations, preserve them as a properly structured list. NEVER collapse a real enumeration into a single paragraph. If items are labeled or named (e.g. "Horizontal compatibility", "Vertical compatibility"), they must remain as separate list entries.
 - After a title: the first sentence of a new section must NOT use demonstrative references like "these", "this", "those", or "such" that point to something before the title. The paragraph must be self-contained.
 - Readability: light rewrites to fix run-on sentences, split overly long clauses, or clarify awkward phrasing are allowed, as long as no content is lost.

@@ -2,6 +2,7 @@ import json
 import os
 import time
 import hashlib
+import shutil
 
 from .checker import LLMChecker
 from .math_formatter import MathFormatter
@@ -22,11 +23,22 @@ REWRITE_CACHE_MODES = {
 class Pipeline:
     """Orchestrates the full flow from PDF input to final markdown output."""
 
-    def __init__(self, pdf_path: str):
+    def __init__(self, pdf_path: str, clear_cache: bool = False):
         """Initialize the pipeline for a single input PDF."""
         self.pdf_path = pdf_path
         self.pdf_name = os.path.splitext(os.path.basename(pdf_path))[0]
         self.cache_dir = os.path.join(CACHE_DIR, self.pdf_name)
+        self.clear_cache = clear_cache
+
+    def reset_pdf_cache(self):
+        """Remove only this PDF's cache directory before a fresh run."""
+        if not os.path.exists(self.cache_dir):
+            return
+
+        shutil.rmtree(self.cache_dir)
+        print("=" * 60)
+        print(f"[RESET] Cleared cache/{self.pdf_name}/")
+        print("=" * 60)
 
     def get_text_hash(self, text: str) -> str:
         """Return a stable hash for a document-sized text input."""
@@ -197,7 +209,8 @@ class Pipeline:
                 if slide.text:
                     section_parts.append(slide.text)
             else:
-                if slide.title and slide.title != previous_title:
+                # Only emit a heading when the slide has body text to follow it
+                if slide.title and slide.title != previous_title and slide.text:
                     section_parts.append(f"## {slide.title}")
                     previous_title = slide.title
 
@@ -213,12 +226,15 @@ class Pipeline:
         """Show the active stage-to-model mapping before the pipeline starts."""
         print("=" * 60)
         print("Model Configuration")
-        for stage, model_name, rpm in get_model_summary():
-            print(f"{stage:18} {model_name}  rpm={rpm}")
+        for stage, model_name, rpm, rpd in get_model_summary():
+            print(f"{stage:18} {model_name}  rpm={rpm}  rpd={rpd}")
         print("=" * 60)
 
     def run(self):
         """Execute the full pipeline and save the final markdown file."""
+        if self.clear_cache:
+            self.reset_pdf_cache()
+
         os.makedirs(self.cache_dir, exist_ok=True)
         self.print_model_configuration()
 
@@ -285,8 +301,8 @@ class Pipeline:
 
         print("=" * 60)
         print("LLM Checker")
-        print(f"Slides : {total}")
-        print(f"Output : cache/{self.pdf_name}/reviews/")
+        print(f"Slides: {total}")
+        print(f"Output: cache/{self.pdf_name}/reviews/")
         print("=" * 60)
 
         checker = LLMChecker()
@@ -331,12 +347,61 @@ class Pipeline:
 
         print("\n" + "=" * 60)
         print("LLM Rewriter")
-        print(f"Slides : {len(slides)}")
+        print(f"Slides: {len(slides)}")
         print("=" * 60)
 
         rewriter = LLMRewriter()
-        rewrites = rewriter.rewrite_all(slides, reviews)
-        self.save_slide_jsons("rewrites", rewrites)
+        rewrites_dir = os.path.join(self.cache_dir, "rewrites")
+        os.makedirs(rewrites_dir, exist_ok=True)
+
+        valid_rewrite_filenames = {f"slide_{slide_number:03d}.json" for slide_number in output_slide_numbers}
+        for filename in os.listdir(rewrites_dir):
+            if filename not in valid_rewrite_filenames:
+                os.remove(os.path.join(rewrites_dir, filename))
+
+        review_by_number = {review.slide_number: review for review in reviews}
+        rewrites: list[SlideRewrite] = []
+        previous_paragraph: str | None = None
+        current_section_title: str | None = None
+        total = len(slides)
+
+        for slide_number, text in slides:
+            review = review_by_number[slide_number]
+            print(f"[{slide_number}/{total}]", end=" ", flush=True)
+
+            cached_slide = self.load_slide_json("rewrites", slide_number)
+            if cached_slide is not None:
+                print("cached rewrite")
+                rewrites.append(cached_slide)
+                if cached_slide.title and not cached_slide.is_continuation:
+                    current_section_title = cached_slide.title
+                previous_paragraph = cached_slide.text or None
+                continue
+
+            transition_paragraph = previous_paragraph
+            starts_new_section = bool(review.title and review.title != current_section_title and not review.is_continuation)
+            if starts_new_section:
+                transition_paragraph = None
+
+            should_call_llm = (
+                review.slide_type not in (SlideType.COURSE_INFO, SlideType.IMAGE_DESCRIPTION, SlideType.INTRODUCTION)
+                and review.reviewer_approved
+                and bool(review.actions)
+            )
+
+            rewrite = rewriter.rewrite_one(text, review, transition_paragraph if should_call_llm else None)
+
+            if rewrite is None:
+                continue
+
+            self.save_slide_json("rewrites", rewrite)
+            rewrites.append(rewrite)
+
+            if rewrite.title and not rewrite.is_continuation:
+                current_section_title = rewrite.title
+
+            previous_paragraph = rewrite.text or None
+
         return rewrites
 
     def _run_math_formatter(self, slides: list[SlideRewrite], output_slide_numbers: list[int]) -> list[SlideRewrite]:
@@ -353,7 +418,7 @@ class Pipeline:
 
         print("\n" + "=" * 60)
         print("Math Formatter")
-        print(f"Slides : {len(slides)}")
+        print(f"Slides: {len(slides)}")
         print("=" * 60)
 
         formatter = MathFormatter()

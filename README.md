@@ -64,9 +64,17 @@ MATH_MODEL=google:gemini-3.1-flash-lite
 TITLE_MODEL=google:gemini-2.5-flash
 QUALITY_IDENTIFIER_MODEL=google:gemini-2.5-flash
 QUALITY_FIXER_MODEL=google:gemini-2.5-flash
+
+CHECKER_MODEL_RPD=500
+REVIEWER_MODEL_RPD=500
+REWRITER_MODEL_RPD=500
+MATH_MODEL_RPD=500
+TITLE_MODEL_RPD=20
+QUALITY_IDENTIFIER_MODEL_RPD=20
+QUALITY_FIXER_MODEL_RPD=20
 ```
 
-If you want to try Gemma for cheaper structured stages, set the relevant stage variables to a Gemma model ID that is available in your Google account. The pipeline prints the active stage-to-model mapping at startup so you can confirm exactly what will be used.
+If you want to try Gemma for the high-volume structured stages, set `GEMMA_LIGHT_MODEL` to the Gemma model ID available in your Google account, or set the individual checker/reviewer/rewriter/math variables directly. The pipeline now tracks a local per-model daily request budget in `cache/_model_usage.json`, prints both `rpm` and `rpd` at startup, and stops cleanly before the configured daily budget is exceeded.
 
 ## Usage
 
