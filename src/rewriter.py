@@ -64,7 +64,7 @@ class LLMRewriter:
         """Call a rewrite-stage model with deterministic pacing and transient retries."""
         attempt = 0
         while True:
-            self.pacer.acquire_request_slot(model_name, rpm, rpd)
+            self.pacer.acquire_request_slot(model_name, rpm, rpd, request_name)
             try:
                 result = runner(prompt)
                 return result.output

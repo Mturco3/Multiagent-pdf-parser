@@ -54,7 +54,7 @@ class MathFormatter:
         """Call the math model with pacing and retries for transient provider failures."""
         attempt = 0
         while True:
-            self.pacer.acquire_request_slot(MATH_MODEL, MATH_MODEL_RPM, MATH_MODEL_RPD)
+            self.pacer.acquire_request_slot(MATH_MODEL, MATH_MODEL_RPM, MATH_MODEL_RPD, "math")
             try:
                 result = math_agent.run_sync(prompt)
                 return result.output
@@ -85,7 +85,7 @@ class MathFormatter:
 
     def apply_replacement(self, text: str, original_text: str, latex: str) -> tuple[str, bool]:
         """Replace one standalone math fragment without interpreting LaTeX escapes."""
-        pattern = r"(?<!\w)" + re.escape(original_text) + r"(?!\w)"
+        pattern = r"(?<![\w.])" + re.escape(original_text) + r"(?![\w.])"
         if not re.search(pattern, text):
             return text, False
 

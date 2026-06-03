@@ -86,11 +86,14 @@ class TitleAnalysis(BaseModel):
 class IssueType(str, Enum):
     """Types of quality issues that can be flagged in the final document."""
     LIST_COLLAPSED = "list_collapsed"
+    BULLET_LIST_SHOULD_BE_COLLAPSED = "bullet_list_should_be_collapsed"
     EXCESSIVE_INTRODUCTION = "excessive_introduction"
     DANGLING_REFERENCE = "dangling_reference"
     CONTENT_LOST = "content_lost"
     REPETITION = "repetition"
     AWKWARD_FLOW = "awkward_flow"
+    QUESTION_FORM = "question_form"
+    RAW_SLIDE_METADATA = "raw_slide_metadata"
 
 
 class QualityIssue(BaseModel):

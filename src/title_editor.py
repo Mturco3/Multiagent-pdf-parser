@@ -60,7 +60,7 @@ class TitleEditor:
         """Call the title model with pacing and transient retry handling."""
         attempt = 0
         while True:
-            self.pacer.acquire_request_slot(TITLE_MODEL, TITLE_MODEL_RPM, TITLE_MODEL_RPD)
+            self.pacer.acquire_request_slot(TITLE_MODEL, TITLE_MODEL_RPM, TITLE_MODEL_RPD, "title")
             try:
                 result = title_identifier_agent.run_sync(prompt)
                 return result.output
@@ -109,6 +109,8 @@ class TitleEditor:
                 heading_text = change.new_text
                 if heading_text is None:
                     heading_text = re.sub(r"^#+\s*", "", change.original_heading)
+                else:
+                    heading_text = re.sub(r"^#+\s*", "", heading_text)
                 new_heading = "#" * change.new_level + " " + heading_text
                 if new_heading != change.original_heading:
                     document = document.replace(change.original_heading, new_heading, 1)

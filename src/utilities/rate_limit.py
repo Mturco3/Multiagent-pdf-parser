@@ -1,3 +1,4 @@
+import csv
 import json
 import os
 import time
@@ -18,6 +19,7 @@ class RequestPacer:
         self.usage_path = os.path.join(project_root, "cache", "_model_usage.json")
         self.recent_path = os.path.join(project_root, "cache", "_model_recent_requests.json")
         self.lock_path = os.path.join(project_root, "cache", "_model_rate_limit.lock")
+        self.request_log_path = os.path.join(project_root, "request_logs", "model_requests.csv")
         self.usage_cache: dict[str, dict[str, int]] | None = None
         self.recent_cache: dict[str, list[float]] | None = None
 
@@ -120,9 +122,6 @@ class RequestPacer:
 
     def ensure_daily_capacity(self, bucket: str, rpd: int):
         """Raise before sending a request if the configured daily budget is exhausted."""
-        if rpd < 1:
-            return
-
         current_count = self.get_daily_count(bucket)
         if current_count >= rpd:
             raise DailyQuotaExceededError(
@@ -145,8 +144,30 @@ class RequestPacer:
         day_usage[bucket] = int(day_usage.get(bucket, 0)) + 1
         self.save_usage()
 
-    def acquire_request_slot(self, bucket: str, rpm: int, rpd: int):
+    def append_request_log(self, bucket: str, request_name: str, requested_at: datetime):
+        """Append one human-readable request reservation row to the CSV log."""
+        os.makedirs(os.path.dirname(self.request_log_path), exist_ok=True)
+        write_header = not os.path.exists(self.request_log_path) or os.path.getsize(self.request_log_path) == 0
+        with open(self.request_log_path, "a", encoding="utf-8", newline="") as file_handle:
+            writer = csv.DictWriter(file_handle, fieldnames=["model", "request_made", "requested_at"])
+            if write_header:
+                writer.writeheader()
+            writer.writerow(
+                {
+                    "model": bucket,
+                    "request_made": request_name,
+                    "requested_at": requested_at.isoformat(timespec="seconds"),
+                }
+            )
+
+    def acquire_request_slot(self, bucket: str, rpm: int, rpd: int, request_name: str | None = None):
         """Reserve one request slot before dispatch using a rolling 60-second window."""
+        if rpm < 1 or rpd < 1:
+            raise DailyQuotaExceededError(
+                f"Configured request budget is zero for {bucket}: rpm={rpm}, rpd={rpd}. "
+                "Switch this stage to an available model or override its limits."
+            )
+
         while True:
             wait_seconds = 0.0
             self.acquire_lock()
@@ -161,6 +182,7 @@ class RequestPacer:
                     timestamps.append(now)
                     self.save_recent()
                     self.increment_daily_usage(bucket)
+                    self.append_request_log(bucket, request_name or "unspecified", datetime.now())
                     return
 
                 oldest_timestamp = min(timestamps)

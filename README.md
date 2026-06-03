@@ -29,7 +29,7 @@ src/
   quality_checker.py     Final document quality reviewer
   models.py              Pydantic models for structured LLM output
   utilities/
-    model_config.py      Stage-specific model and RPM configuration
+    model_config.py      Stage-specific model, RPM, and RPD configuration
     normalizer.py        Shared text normalization helpers
     prompts.py           All LLM system prompts
     rate_limit.py        Shared per-model pacing helper
@@ -65,16 +65,25 @@ TITLE_MODEL=google:gemini-2.5-flash
 QUALITY_IDENTIFIER_MODEL=google:gemini-2.5-flash
 QUALITY_FIXER_MODEL=google:gemini-2.5-flash
 
+LIGHT_MODEL=google:gemma-4-26b
+
+CHECKER_MODEL_RPM=15
 CHECKER_MODEL_RPD=500
+REVIEWER_MODEL_RPM=15
 REVIEWER_MODEL_RPD=500
+REWRITER_MODEL_RPM=15
 REWRITER_MODEL_RPD=500
+MATH_MODEL_RPM=15
 MATH_MODEL_RPD=500
+TITLE_MODEL_RPM=5
 TITLE_MODEL_RPD=20
+QUALITY_IDENTIFIER_MODEL_RPM=5
 QUALITY_IDENTIFIER_MODEL_RPD=20
+QUALITY_FIXER_MODEL_RPM=5
 QUALITY_FIXER_MODEL_RPD=20
 ```
 
-If you want to try Gemma for the high-volume structured stages, set `GEMMA_LIGHT_MODEL` to the Gemma model ID available in your Google account, or set the individual checker/reviewer/rewriter/math variables directly. The pipeline now tracks a local per-model daily request budget in `cache/_model_usage.json`, prints both `rpm` and `rpd` at startup, and stops cleanly before the configured daily budget is exceeded.
+Known model families and their default request budgets are defined in `src/utilities/model_config.py`, including the Gemma option. To try Gemma for high-volume structured stages, set `LIGHT_MODEL` to the Gemma model ID available in your Google account, or set the individual checker/reviewer/rewriter/math variables directly. The pipeline tracks a local per-model daily request budget in `cache/_model_usage.json`, writes a readable request log to `request_logs/model_requests.csv`, prints both `rpm` and `rpd` at startup, and stops cleanly before a configured budget is exceeded.
 
 ## Usage
 

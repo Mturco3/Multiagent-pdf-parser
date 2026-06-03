@@ -181,6 +181,9 @@ class Pipeline:
         slide_numbers: list[int] = []
 
         for review in reviews:
+            if self.is_outline_review(review):
+                continue
+
             if review.slide_type in (SlideType.COURSE_INFO, SlideType.IMAGE_DESCRIPTION):
                 continue
 
@@ -190,6 +193,26 @@ class Pipeline:
             slide_numbers.append(review.slide_number)
 
         return slide_numbers
+
+    def is_outline_review(self, review: SlideReview) -> bool:
+        """Return whether a slide review is an agenda/outline slide that should not become notes."""
+        if not review.title:
+            return False
+
+        normalized_title = review.title.strip().lower()
+        normalized_title = normalized_title.rstrip(":")
+        outline_titles = {
+            "agenda",
+            "contents",
+            "outline",
+            "overview",
+            "roadmap",
+            "table of contents",
+            "today",
+            "today's agenda",
+            "today's outline",
+        }
+        return normalized_title in outline_titles
 
     def get_slide_number(self, filename: str) -> int:
         """Extract the slide number from a cached transcription filename."""

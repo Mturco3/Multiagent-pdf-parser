@@ -76,7 +76,7 @@ class QualityChecker:
         """Retry transient provider failures with backoff while keeping prompts deterministic."""
         attempt = 0
         while True:
-            self.pacer.acquire_request_slot(model_name, rpm, rpd)
+            self.pacer.acquire_request_slot(model_name, rpm, rpd, request_name)
             try:
                 result = runner(prompt)
                 return result
@@ -124,6 +124,22 @@ class QualityChecker:
             print("No issues found.")
         return report
 
+    def replace_first_non_heading_occurrence(self, document: str, target: str, replacement: str) -> tuple[str, bool]:
+        """Replace the first target occurrence that is not part of a markdown heading."""
+        start = 0
+        while True:
+            index = document.find(target, start)
+            if index < 0:
+                return document, False
+
+            line_start = document.rfind("\n", 0, index) + 1
+            prefix = document[line_start:index].strip()
+            if not prefix.startswith("#"):
+                updated = document[:index] + replacement + document[index + len(target):]
+                return updated, True
+
+            start = index + len(target)
+
     def fix(self, document: str, report: QualityReport) -> str:
         """Fix each identified issue by sending the problematic fragment to the LLM."""
         # Filter out content_lost issues since they cannot be fixed without originals
@@ -141,7 +157,10 @@ class QualityChecker:
 
             # Handle repetition programmatically by removing the duplicate
             if issue.issue_type == IssueType.REPETITION:
-                document = document.replace(issue.problematic_text, "", 1)
+                document, fixed = self.replace_first_non_heading_occurrence(document, issue.problematic_text, "")
+                if not fixed:
+                    print(f"[skip] Could not find non-heading duplicate for {issue.issue_type.value}")
+                    continue
                 # Clean up leftover blank lines from removal
                 while "\n\n\n" in document:
                     document = document.replace("\n\n\n", "\n\n")
