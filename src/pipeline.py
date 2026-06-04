@@ -514,15 +514,20 @@ class Pipeline:
         print("=" * 60)
 
         quality_checker = QualityChecker()
+        document = quality_checker.sanitize_document(document)
         cached_report = self.load_json("quality_report", document)
         if cached_report:
             print("Loading cached quality report")
             report = QualityReport(**cached_report)
         else:
-            report = quality_checker.check(document)
-            self.save_json("quality_report", report.model_dump(), document)
+            try:
+                report = quality_checker.check(document)
+                self.save_json("quality_report", report.model_dump(), document)
+            except Exception as error:
+                print(f"[warn] Quality checker model failed; using deterministic cleanup only ({error})")
+                report = QualityReport(issues=[])
 
         if report.issues:
             document = quality_checker.fix(document, report)
 
-        return document
+        return quality_checker.sanitize_document(document)

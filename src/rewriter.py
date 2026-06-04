@@ -154,6 +154,19 @@ class LLMRewriter:
             return None
         return review.title
 
+    def finalize_passthrough_title(self, slide_text: str, review: SlideReview, fallback: SlideRewrite) -> SlideRewrite:
+        """Validate a passthrough title when possible, but keep moving on provider failures."""
+        if not fallback.title or not fallback.text:
+            return fallback
+
+        try:
+            title_review = self.review_title_support(slide_text, review.title, fallback.text)
+        except Exception as error:
+            print(f"[slide {review.slide_number:03d}] title review failed; keeping passthrough title ({error})")
+            return fallback
+
+        return fallback.model_copy(update={"title": self.finalize_title(review, title_review)})
+
     def rewrite_one(self, slide_text: str, review: SlideReview, previous_paragraph: str | None = None) -> SlideRewrite | None:
         """Rewrite one slide or skip it when the slide should not be sent to the LLM."""
         if review.slide_type in (SlideType.COURSE_INFO, SlideType.IMAGE_DESCRIPTION):
@@ -167,18 +180,12 @@ class LLMRewriter:
         if not review.reviewer_approved:
             print(f"[slide {review.slide_number:03d}] review not approved; preserving extracted body text")
             fallback = self.build_passthrough_output(slide_text, review)
-            if fallback.title and fallback.text:
-                title_review = self.review_title_support(slide_text, review.title, fallback.text)
-                return fallback.model_copy(update={"title": self.finalize_title(review, title_review)})
-            return fallback
+            return self.finalize_passthrough_title(slide_text, review, fallback)
 
         if not review.actions:
             print(f"[slide {review.slide_number:03d}] no approved actions; preserving extracted body text")
             fallback = self.build_passthrough_output(slide_text, review)
-            if fallback.title and fallback.text:
-                title_review = self.review_title_support(slide_text, review.title, fallback.text)
-                return fallback.model_copy(update={"title": self.finalize_title(review, title_review)})
-            return fallback
+            return self.finalize_passthrough_title(slide_text, review, fallback)
 
         body_text = self.extract_body_text(slide_text, review)
         actions_text = "\n".join(f"- {action.action.value}: \"{action.original_fragment}\"" for action in review.actions)
@@ -192,8 +199,12 @@ class LLMRewriter:
                 prompt += f"\n\nReviewer feedback from the previous attempt:\n{retry_instruction}"
 
             print(f"[slide {review.slide_number:03d}] rewriting attempt {attempt}/{MAX_REWRITE_ATTEMPTS} ({len(review.actions)} approved action(s))...")
-            rewritten_text = self.run_rewriter_request(prompt)
-            title_review = self.review_title_support(slide_text, review.title, rewritten_text)
+            try:
+                rewritten_text = self.run_rewriter_request(prompt)
+                title_review = self.review_title_support(slide_text, review.title, rewritten_text)
+            except Exception as error:
+                print(f"[slide {review.slide_number:03d}] rewrite request failed; falling back to deterministic passthrough ({error})")
+                break
 
             if title_review.approved:
                 print(f"[slide {review.slide_number:03d}] done")
@@ -211,10 +222,7 @@ class LLMRewriter:
 
         print(f"[slide {review.slide_number:03d}] rewrite not approved; falling back to deterministic passthrough")
         fallback = self.build_passthrough_output(slide_text, review)
-        if fallback.title and fallback.text:
-            fallback_review = self.review_title_support(slide_text, review.title, fallback.text)
-            return fallback.model_copy(update={"title": self.finalize_title(review, fallback_review)})
-        return fallback
+        return self.finalize_passthrough_title(slide_text, review, fallback)
 
     def rewrite_all(self, slides: list[tuple[int, str]], reviews: list[SlideReview]) -> list[SlideRewrite]:
         """Rewrite all slides that should appear in the final document."""
