@@ -485,9 +485,6 @@ class Pipeline:
 
     def _run_title_editor(self, document: str) -> str:
         """Run title analysis and apply the resulting heading edits."""
-        print(f"\nWaiting {WINDOW_SECONDS}s before title editing step...")
-        time.sleep(WINDOW_SECONDS)
-
         print("\n" + "=" * 60)
         print("Title Editor")
         print("=" * 60)
@@ -498,6 +495,8 @@ class Pipeline:
             print("Loading cached title analysis")
             analysis = TitleAnalysis(**cached_analysis)
         else:
+            print(f"Waiting {WINDOW_SECONDS}s before title editing step...")
+            time.sleep(WINDOW_SECONDS)
             analysis = title_editor.edit(document)
             self.save_json("title_analysis", analysis.model_dump(), document)
 
@@ -506,9 +505,6 @@ class Pipeline:
 
     def _run_quality_checker(self, document: str) -> str:
         """Run the quality checker and apply any requested fixes."""
-        print(f"\nWaiting {WINDOW_SECONDS}s before quality check step...")
-        time.sleep(WINDOW_SECONDS)
-
         print("\n" + "=" * 60)
         print("Quality Checker")
         print("=" * 60)
@@ -520,6 +516,8 @@ class Pipeline:
             print("Loading cached quality report")
             report = QualityReport(**cached_report)
         else:
+            print(f"Waiting {WINDOW_SECONDS}s before quality check step...")
+            time.sleep(WINDOW_SECONDS)
             try:
                 report = quality_checker.check(document)
                 self.save_json("quality_report", report.model_dump(), document)
