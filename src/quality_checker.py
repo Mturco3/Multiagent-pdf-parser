@@ -1,42 +1,30 @@
 import re
-import time
 
-import httpx
 from pydantic_ai import Agent
-from pydantic_ai.exceptions import ModelHTTPError
 
 from .models import QualityReport, IssueType
+from .utilities.normalizer import repair_text
 from .utilities.model_config import (
+    QUALITY_FIXER_FALLBACK_MODEL,
+    QUALITY_FIXER_FALLBACK_MODEL_RPD,
+    QUALITY_FIXER_FALLBACK_MODEL_RPM,
     QUALITY_FIXER_MODEL,
     QUALITY_FIXER_MODEL_RPD,
     QUALITY_FIXER_MODEL_RPM,
+    QUALITY_IDENTIFIER_FALLBACK_MODEL,
+    QUALITY_IDENTIFIER_FALLBACK_MODEL_RPD,
+    QUALITY_IDENTIFIER_FALLBACK_MODEL_RPM,
     QUALITY_IDENTIFIER_MODEL,
     QUALITY_IDENTIFIER_MODEL_RPD,
     QUALITY_IDENTIFIER_MODEL_RPM,
     WINDOW_SECONDS,
 )
+from .utilities.model_retry import ModelRequestCandidate, get_cached_agent, run_with_transient_retry_and_fallback
 from .utilities.prompts import QUALITY_CHECKER_PROMPT, QUALITY_FIXER_PROMPT
-from .utilities.rate_limit import DailyQuotaExceededError, RequestPacer
+from .utilities.rate_limit import RequestPacer
 
-MAX_MODEL_RETRIES = 3
-TIMEOUT_RETRY_DELAY_SECONDS = 30.0
-TRANSIENT_STATUS_CODES = {429, 500, 503}
-
-# Identifies quality issues in the document
-quality_identifier_agent = Agent(
-    QUALITY_IDENTIFIER_MODEL,
-    output_type=QualityReport,
-    instructions=QUALITY_CHECKER_PROMPT,
-    model_settings={"temperature": 0}
-)
-
-# Fixes a single text fragment based on an identified issue
-quality_fixer_agent = Agent(
-    QUALITY_FIXER_MODEL,
-    output_type=str,
-    instructions=QUALITY_FIXER_PROMPT,
-    model_settings={"temperature": 0}
-)
+quality_identifier_agents: dict[str, Agent] = {}
+quality_fixer_agents: dict[str, Agent] = {}
 
 
 class QualityChecker:
@@ -46,78 +34,72 @@ class QualityChecker:
         """Initialize the quality checker with rate-limited model access."""
         self.pacer = RequestPacer(WINDOW_SECONDS)
 
-    def get_retry_delay(self, error: ModelHTTPError) -> float:
-        """Extract a provider-suggested retry delay when one is available."""
-        retry_delay = None
-        body = error.body
-        if isinstance(body, dict):
-            error_payload = body.get("error")
-            if isinstance(error_payload, dict):
-                details = error_payload.get("details")
-                if isinstance(details, list):
-                    for detail in details:
-                        if not isinstance(detail, dict):
-                            continue
-                        retry_text = detail.get("retryDelay")
-                        if isinstance(retry_text, str) and retry_text.endswith("s"):
-                            try:
-                                retry_delay = float(retry_text[:-1])
-                                break
-                            except ValueError:
-                                continue
-
-        if retry_delay is not None:
-            return max(retry_delay, 1.0)
-
-        if error.status_code == 429:
-            return float(WINDOW_SECONDS)
-        return 30.0
-
-    def run_with_transient_retry(self, request_name: str, model_name: str, rpm: int, rpd: int, runner, prompt: str):
-        """Retry transient provider failures with backoff while keeping prompts deterministic."""
-        attempt = 0
-        while True:
-            self.pacer.acquire_request_slot(model_name, rpm, rpd, request_name)
-            try:
-                result = runner(prompt)
-                return result
-            except ModelHTTPError as error:
-                if error.status_code == 429 and self.pacer.is_daily_quota_error(error.body):
-                    self.pacer.mark_daily_exhausted(model_name, rpd)
-                    raise DailyQuotaExceededError(
-                        f"Provider daily request quota exhausted for {model_name}. "
-                        "Resume after reset or switch this stage to another model."
-                    ) from error
-                if error.status_code not in TRANSIENT_STATUS_CODES or attempt >= MAX_MODEL_RETRIES - 1:
-                    raise
-
-                delay = self.get_retry_delay(error)
-                attempt += 1
-                print(f"{request_name} transient error {error.status_code} - retrying in {delay:.1f}s ({attempt}/{MAX_MODEL_RETRIES})...")
-                time.sleep(delay)
-            except httpx.TimeoutException as error:
-                if attempt >= MAX_MODEL_RETRIES - 1:
-                    raise
-
-                attempt += 1
-                print(
-                    f"{request_name} transient timeout - retrying in "
-                    f"{TIMEOUT_RETRY_DELAY_SECONDS:.1f}s ({attempt}/{MAX_MODEL_RETRIES})..."
+    def run_identifier_request(self, prompt: str) -> QualityReport:
+        """Run the quality identifier with transient retry and 503 fallback handling."""
+        candidates = [
+            ModelRequestCandidate(
+                QUALITY_IDENTIFIER_MODEL,
+                QUALITY_IDENTIFIER_MODEL_RPM,
+                QUALITY_IDENTIFIER_MODEL_RPD,
+                lambda text: get_cached_agent(
+                    quality_identifier_agents,
+                    QUALITY_IDENTIFIER_MODEL,
+                    QualityReport,
+                    QUALITY_CHECKER_PROMPT,
+                ).run_sync(text).output,
+            )
+        ]
+        if QUALITY_IDENTIFIER_FALLBACK_MODEL:
+            candidates.append(
+                ModelRequestCandidate(
+                    QUALITY_IDENTIFIER_FALLBACK_MODEL,
+                    QUALITY_IDENTIFIER_FALLBACK_MODEL_RPM,
+                    QUALITY_IDENTIFIER_FALLBACK_MODEL_RPD,
+                    lambda text: get_cached_agent(
+                        quality_identifier_agents,
+                        QUALITY_IDENTIFIER_FALLBACK_MODEL,
+                        QualityReport,
+                        QUALITY_CHECKER_PROMPT,
+                    ).run_sync(text).output,
                 )
-                time.sleep(TIMEOUT_RETRY_DELAY_SECONDS)
+            )
+        return run_with_transient_retry_and_fallback(self.pacer, "quality-identifier", candidates, prompt, WINDOW_SECONDS)
+
+    def run_fixer_request(self, prompt: str) -> str:
+        """Run the quality fixer with transient retry and 503 fallback handling."""
+        candidates = [
+            ModelRequestCandidate(
+                QUALITY_FIXER_MODEL,
+                QUALITY_FIXER_MODEL_RPM,
+                QUALITY_FIXER_MODEL_RPD,
+                lambda text: get_cached_agent(
+                    quality_fixer_agents,
+                    QUALITY_FIXER_MODEL,
+                    str,
+                    QUALITY_FIXER_PROMPT,
+                ).run_sync(text).output,
+            )
+        ]
+        if QUALITY_FIXER_FALLBACK_MODEL:
+            candidates.append(
+                ModelRequestCandidate(
+                    QUALITY_FIXER_FALLBACK_MODEL,
+                    QUALITY_FIXER_FALLBACK_MODEL_RPM,
+                    QUALITY_FIXER_FALLBACK_MODEL_RPD,
+                    lambda text: get_cached_agent(
+                        quality_fixer_agents,
+                        QUALITY_FIXER_FALLBACK_MODEL,
+                        str,
+                        QUALITY_FIXER_PROMPT,
+                    ).run_sync(text).output,
+                )
+            )
+        return run_with_transient_retry_and_fallback(self.pacer, "quality-fixer", candidates, prompt, WINDOW_SECONDS)
 
     def identify(self, document: str) -> QualityReport:
         """Send the document to the LLM for quality review."""
         print("Identifying quality issues...")
-        result = self.run_with_transient_retry(
-            "quality-identifier",
-            QUALITY_IDENTIFIER_MODEL,
-            QUALITY_IDENTIFIER_MODEL_RPM,
-            QUALITY_IDENTIFIER_MODEL_RPD,
-            quality_identifier_agent.run_sync,
-            f"Document:\n\n{document}",
-        )
-        report = result.output
+        report = self.run_identifier_request(f"Document:\n\n{document}")
         if report.issues:
             for issue in report.issues:
                 print(f"[{issue.issue_type.value}] {issue.explanation}")
@@ -195,6 +177,14 @@ class QualityChecker:
         cleaned = re.sub(r"\?(\s|$)", r".\1", cleaned)
         return cleaned
 
+    def repair_math_delimiters(self, text: str) -> str:
+        """Repair common malformed inline math delimiters left by model replacements."""
+        cleaned = text
+        cleaned = re.sub(r"\$\$([A-Za-z](?:_\{?[A-Za-z0-9]+\}?|\^\{?[A-Za-z0-9]+\}?)?)\$\$", r"$\1$", cleaned)
+        cleaned = re.sub(r"\$\$([^$\n]{1,20})\$", r"$\1$", cleaned)
+        cleaned = re.sub(r"\$([A-Za-z])\$\s*\\times\s*([A-Za-z])\$", r"$\1 \\times \2$", cleaned)
+        return cleaned
+
     def bullet_item_text(self, line: str) -> str:
         """Return the text of a markdown bullet line without its marker."""
         return re.sub(r"^\s*[-*]\s+", "", line).strip()
@@ -257,10 +247,11 @@ class QualityChecker:
 
     def sanitize_document(self, document: str) -> str:
         """Apply deterministic final cleanup for known slide-transcription artifacts."""
-        cleaned = document.replace("\r\n", "\n").replace("\r", "\n")
+        cleaned = repair_text(document).replace("\r\n", "\n").replace("\r", "\n")
         cleaned = self.remove_validation_artifacts(cleaned)
         cleaned = self.remove_raw_slide_metadata(cleaned)
         cleaned = self.normalize_question_form(cleaned)
+        cleaned = self.repair_math_delimiters(cleaned)
         cleaned = self.collapse_fragment_bullets(cleaned)
         cleaned = re.sub(r"\n#{6,}\s+", "\n#### ", cleaned)
         cleaned = re.sub(r"^#{1,6}\s*$\n?", "", cleaned, flags=re.MULTILINE)
@@ -317,15 +308,8 @@ class QualityChecker:
             print(f"[fixing] {issue.issue_type.value}...")
             prompt = f"Issue type: {issue.issue_type.value}\nExplanation: {issue.explanation}\n\nText to fix:\n{issue.problematic_text}"
             try:
-                result = self.run_with_transient_retry(
-                    "quality-fixer",
-                    QUALITY_FIXER_MODEL,
-                    QUALITY_FIXER_MODEL_RPM,
-                    QUALITY_FIXER_MODEL_RPD,
-                    quality_fixer_agent.run_sync,
-                    prompt,
-                )
-                document = document.replace(issue.problematic_text, result.output, 1)
+                replacement = self.run_fixer_request(prompt)
+                document = document.replace(issue.problematic_text, replacement, 1)
                 print(f"[fixed] {issue.issue_type.value}")
             except Exception as error:
                 print(f"[error] Failed to fix {issue.issue_type.value}: {error}")

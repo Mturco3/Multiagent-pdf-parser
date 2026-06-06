@@ -44,6 +44,16 @@ class Pipeline:
         """Return a stable hash for a document-sized text input."""
         return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
+    def get_cache_source(self, *parts) -> str:
+        """Build a stable source string for cache provenance checks."""
+        source_parts: list[str] = []
+        for part in parts:
+            if isinstance(part, str):
+                source_parts.append(part)
+            else:
+                source_parts.append(json.dumps(part, sort_keys=True, ensure_ascii=False))
+        return "\n--- cache-source-part ---\n".join(source_parts)
+
     def save_json(self, name: str, data, source_text: str | None = None):
         """Save a JSON-serializable object in the PDF cache directory."""
         json_path = os.path.join(self.cache_dir, f"{name}.json")
@@ -87,14 +97,18 @@ class Pipeline:
             filepath = os.path.join(directory, filename)
             os.remove(filepath)
 
-    def save_review_json(self, reviews_dir: str, review: SlideReview):
+    def save_review_json(self, reviews_dir: str, review: SlideReview, source_text: str):
         """Persist one slide review immediately so the checker can resume after failures."""
         review_filename = f"slide_{review.slide_number:03d}_review.json"
         review_path = os.path.join(reviews_dir, review_filename)
+        payload = {
+            "source_hash": self.get_text_hash(source_text),
+            "data": review.model_dump(mode="json"),
+        }
         with open(review_path, "w", encoding="utf-8") as file_handle:
-            json.dump(review.model_dump(), file_handle, indent=2, ensure_ascii=False)
+            json.dump(payload, file_handle, indent=2, ensure_ascii=False)
 
-    def load_review_json(self, reviews_dir: str, slide_number: int) -> SlideReview | None:
+    def load_review_json(self, reviews_dir: str, slide_number: int, source_text: str) -> SlideReview | None:
         """Load one cached review when it matches the current schema."""
         review_filename = f"slide_{slide_number:03d}_review.json"
         review_path = os.path.join(reviews_dir, review_filename)
@@ -104,11 +118,20 @@ class Pipeline:
         with open(review_path, encoding="utf-8") as file_handle:
             payload = json.load(file_handle)
 
-        if "reviewer_approved" not in payload or "checker_attempts" not in payload:
+        if not isinstance(payload, dict) or payload.get("source_hash") != self.get_text_hash(source_text):
             os.remove(review_path)
             return None
 
-        return SlideReview(**payload)
+        review_payload = payload.get("data")
+        if not isinstance(review_payload, dict):
+            os.remove(review_path)
+            return None
+
+        if "reviewer_approved" not in review_payload or "checker_attempts" not in review_payload:
+            os.remove(review_path)
+            return None
+
+        return SlideReview(**review_payload)
 
     def save_slide_jsons(self, directory: str, slides: list[SlideRewrite]):
         """Save per-slide rewrite artifacts after clearing stale files."""
@@ -124,16 +147,22 @@ class Pipeline:
 
         print(f"[saved] {len(slides)} slides to {directory}/")
 
-    def save_slide_json(self, directory: str, slide: SlideRewrite):
+    def save_slide_json(self, directory: str, slide: SlideRewrite, source_text: str | None = None):
         """Persist one slide artifact immediately so long stages can resume safely."""
         dir_path = os.path.join(self.cache_dir, directory)
         os.makedirs(dir_path, exist_ok=True)
         filename = f"slide_{slide.slide_number:03d}.json"
         filepath = os.path.join(dir_path, filename)
+        payload = slide.model_dump(mode="json")
+        if source_text is not None:
+            payload = {
+                "source_hash": self.get_text_hash(source_text),
+                "data": payload,
+            }
         with open(filepath, "w", encoding="utf-8") as file_handle:
-            json.dump(slide.model_dump(), file_handle, indent=2, ensure_ascii=False)
+            json.dump(payload, file_handle, indent=2, ensure_ascii=False)
 
-    def load_slide_json(self, directory: str, slide_number: int) -> SlideRewrite | None:
+    def load_slide_json(self, directory: str, slide_number: int, source_text: str | None = None) -> SlideRewrite | None:
         """Load one cached slide artifact when it matches the current schema."""
         dir_path = os.path.join(self.cache_dir, directory)
         filepath = os.path.join(dir_path, f"slide_{slide_number:03d}.json")
@@ -143,13 +172,24 @@ class Pipeline:
         with open(filepath, encoding="utf-8") as file_handle:
             payload = json.load(file_handle)
 
-        if payload.get("rewrite_mode") not in REWRITE_CACHE_MODES:
+        if source_text is not None:
+            if not isinstance(payload, dict) or payload.get("source_hash") != self.get_text_hash(source_text):
+                os.remove(filepath)
+                return None
+            payload = payload.get("data")
+
+        if not isinstance(payload, dict) or payload.get("rewrite_mode") not in REWRITE_CACHE_MODES:
             os.remove(filepath)
             return None
 
         return SlideRewrite(**payload)
 
-    def load_slide_jsons(self, directory: str, expected_slide_numbers: list[int]) -> list[SlideRewrite] | None:
+    def load_slide_jsons(
+        self,
+        directory: str,
+        expected_slide_numbers: list[int],
+        source_by_slide: dict[int, str] | None = None,
+    ) -> list[SlideRewrite] | None:
         """Load cached slide artifacts only when the file set matches exactly."""
         dir_path = os.path.join(self.cache_dir, directory)
         if not os.path.exists(dir_path):
@@ -167,12 +207,12 @@ class Pipeline:
 
         slides: list[SlideRewrite] = []
         for filename in expected_filenames:
-            filepath = os.path.join(dir_path, filename)
-            with open(filepath, encoding="utf-8") as file_handle:
-                payload = json.load(file_handle)
-                if payload.get("rewrite_mode") not in REWRITE_CACHE_MODES:
-                    return None
-                slides.append(SlideRewrite(**payload))
+            slide_number = int(filename.removeprefix("slide_").removesuffix(".json"))
+            source_text = source_by_slide.get(slide_number) if source_by_slide else None
+            slide = self.load_slide_json(directory, slide_number, source_text)
+            if slide is None:
+                return None
+            slides.append(slide)
 
         return slides
 
@@ -332,14 +372,14 @@ class Pipeline:
         reviews: list[SlideReview] = []
         for index, (slide_number, text) in enumerate(slides, start=1):
             print(f"[{slide_number}/{total}]", end=" ", flush=True)
-            cached_review = self.load_review_json(reviews_dir, slide_number)
+            cached_review = self.load_review_json(reviews_dir, slide_number, text)
             if cached_review is not None:
                 print(f"cached - {cached_review.slide_type.value}")
                 reviews.append(cached_review)
                 continue
 
             review = checker.check_one(slide_number, text)
-            self.save_review_json(reviews_dir, review)
+            self.save_review_json(reviews_dir, review, text)
             reviews.append(review)
 
         print("\n" + "=" * 60)
@@ -358,7 +398,14 @@ class Pipeline:
 
     def _run_rewriter(self, slides: list[tuple[int, str]], reviews: list[SlideReview], output_slide_numbers: list[int]) -> list[SlideRewrite]:
         """Run the rewriter step or load exact cached rewrites."""
-        cached = self.load_slide_jsons("rewrites", output_slide_numbers)
+        review_by_number = {review.slide_number: review for review in reviews}
+        source_by_number = {
+            slide_number: self.get_cache_source(text, review_by_number[slide_number].model_dump(mode="json"))
+            for slide_number, text in slides
+            if slide_number in output_slide_numbers
+        }
+
+        cached = self.load_slide_jsons("rewrites", output_slide_numbers, source_by_number)
         if cached is not None:
             print("=" * 60)
             print("Loading cached rewrites")
@@ -382,7 +429,6 @@ class Pipeline:
             if filename not in valid_rewrite_filenames:
                 os.remove(os.path.join(rewrites_dir, filename))
 
-        review_by_number = {review.slide_number: review for review in reviews}
         rewrites: list[SlideRewrite] = []
         previous_paragraph: str | None = None
         current_section_title: str | None = None
@@ -392,7 +438,7 @@ class Pipeline:
             review = review_by_number[slide_number]
             print(f"[{slide_number}/{total}]", end=" ", flush=True)
 
-            cached_slide = self.load_slide_json("rewrites", slide_number)
+            cached_slide = self.load_slide_json("rewrites", slide_number, source_by_number.get(slide_number))
             if cached_slide is not None:
                 print("cached rewrite")
                 rewrites.append(cached_slide)
@@ -417,7 +463,7 @@ class Pipeline:
             if rewrite is None:
                 continue
 
-            self.save_slide_json("rewrites", rewrite)
+            self.save_slide_json("rewrites", rewrite, source_by_number.get(slide_number))
             rewrites.append(rewrite)
 
             if rewrite.title and not rewrite.is_continuation:
@@ -429,7 +475,12 @@ class Pipeline:
 
     def _run_math_formatter(self, slides: list[SlideRewrite], output_slide_numbers: list[int]) -> list[SlideRewrite]:
         """Run the math formatter step or load exact cached results."""
-        cached = self.load_slide_jsons("math", output_slide_numbers)
+        source_by_number = {
+            slide.slide_number: self.get_cache_source(slide.model_dump(mode="json"))
+            for slide in slides
+        }
+
+        cached = self.load_slide_jsons("math", output_slide_numbers, source_by_number)
         if cached is not None:
             print("=" * 60)
             print("Loading cached math formatted slides")
@@ -462,14 +513,14 @@ class Pipeline:
 
         updated_slides: list[SlideRewrite] = []
         for slide in slides:
-            cached_slide = self.load_slide_json("math", slide.slide_number)
+            cached_slide = self.load_slide_json("math", slide.slide_number, source_by_number[slide.slide_number])
             if cached_slide is not None:
                 print(f"[slide {slide.slide_number:03d}] cached math")
                 updated_slides.append(cached_slide)
                 continue
 
             updated_slide, response = formatter.format_slide(slide)
-            self.save_slide_json("math", updated_slide)
+            self.save_slide_json("math", updated_slide, source_by_number[slide.slide_number])
 
             filename = f"slide_{slide.slide_number:03d}_replacements.json"
             filepath = os.path.join(math_dir, filename)

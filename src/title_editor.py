@@ -1,25 +1,22 @@
 import re
-import time
 
-import httpx
 from pydantic_ai import Agent
-from pydantic_ai.exceptions import ModelHTTPError
 
 from .models import TitleAnalysis, HeadingAction
-from .utilities.model_config import TITLE_MODEL, TITLE_MODEL_RPD, TITLE_MODEL_RPM, WINDOW_SECONDS
-from .utilities.prompts import TITLE_IDENTIFIER_PROMPT
-from .utilities.rate_limit import DailyQuotaExceededError, RequestPacer
-
-# Identifies heading changes needed in the document
-title_identifier_agent = Agent(
+from .utilities.model_config import (
+    TITLE_FALLBACK_MODEL,
+    TITLE_FALLBACK_MODEL_RPD,
+    TITLE_FALLBACK_MODEL_RPM,
     TITLE_MODEL,
-    output_type=TitleAnalysis,
-    instructions=TITLE_IDENTIFIER_PROMPT,
-    model_settings={"temperature": 0}
+    TITLE_MODEL_RPD,
+    TITLE_MODEL_RPM,
+    WINDOW_SECONDS,
 )
-MAX_MODEL_RETRIES = 3
-TIMEOUT_RETRY_DELAY_SECONDS = 30.0
-TRANSIENT_STATUS_CODES = {429, 500, 503}
+from .utilities.model_retry import ModelRequestCandidate, get_cached_agent, run_with_transient_retry_and_fallback
+from .utilities.prompts import TITLE_IDENTIFIER_PROMPT
+from .utilities.rate_limit import RequestPacer
+
+title_identifier_agents: dict[str, Agent] = {}
 
 
 class TitleEditor:
@@ -29,65 +26,36 @@ class TitleEditor:
         """Initialize the title editor with rate-limited model access."""
         self.pacer = RequestPacer(WINDOW_SECONDS)
 
-    def get_retry_delay(self, error: ModelHTTPError) -> float:
-        """Extract a provider-suggested retry delay when one is available."""
-        retry_delay = None
-        body = error.body
-        if isinstance(body, dict):
-            error_payload = body.get("error")
-            if isinstance(error_payload, dict):
-                details = error_payload.get("details")
-                if isinstance(details, list):
-                    for detail in details:
-                        if not isinstance(detail, dict):
-                            continue
-                        retry_text = detail.get("retryDelay")
-                        if isinstance(retry_text, str) and retry_text.endswith("s"):
-                            try:
-                                retry_delay = float(retry_text[:-1])
-                                break
-                            except ValueError:
-                                continue
-
-        if retry_delay is not None:
-            return max(retry_delay, 1.0)
-
-        if error.status_code == 429:
-            return float(WINDOW_SECONDS)
-        return 30.0
-
     def run_identifier_request(self, prompt: str) -> TitleAnalysis:
         """Call the title model with pacing and transient retry handling."""
-        attempt = 0
-        while True:
-            self.pacer.acquire_request_slot(TITLE_MODEL, TITLE_MODEL_RPM, TITLE_MODEL_RPD, "title")
-            try:
-                result = title_identifier_agent.run_sync(prompt)
-                return result.output
-            except ModelHTTPError as error:
-                if error.status_code == 429 and self.pacer.is_daily_quota_error(error.body):
-                    self.pacer.mark_daily_exhausted(TITLE_MODEL, TITLE_MODEL_RPD)
-                    raise DailyQuotaExceededError(
-                        f"Provider daily request quota exhausted for {TITLE_MODEL}. "
-                        "Resume after reset or switch this stage to another model."
-                    ) from error
-                if error.status_code not in TRANSIENT_STATUS_CODES or attempt >= MAX_MODEL_RETRIES - 1:
-                    raise
-
-                delay = self.get_retry_delay(error)
-                attempt += 1
-                print(f"title transient error {error.status_code} - retrying in {delay:.1f}s ({attempt}/{MAX_MODEL_RETRIES})...")
-                time.sleep(delay)
-            except httpx.TimeoutException as error:
-                if attempt >= MAX_MODEL_RETRIES - 1:
-                    raise
-
-                attempt += 1
-                print(
-                    f"title transient timeout - retrying in "
-                    f"{TIMEOUT_RETRY_DELAY_SECONDS:.1f}s ({attempt}/{MAX_MODEL_RETRIES})..."
+        candidates = [
+            ModelRequestCandidate(
+                TITLE_MODEL,
+                TITLE_MODEL_RPM,
+                TITLE_MODEL_RPD,
+                lambda text: get_cached_agent(
+                    title_identifier_agents,
+                    TITLE_MODEL,
+                    TitleAnalysis,
+                    TITLE_IDENTIFIER_PROMPT,
+                ).run_sync(text).output,
+            )
+        ]
+        if TITLE_FALLBACK_MODEL:
+            candidates.append(
+                ModelRequestCandidate(
+                    TITLE_FALLBACK_MODEL,
+                    TITLE_FALLBACK_MODEL_RPM,
+                    TITLE_FALLBACK_MODEL_RPD,
+                    lambda text: get_cached_agent(
+                        title_identifier_agents,
+                        TITLE_FALLBACK_MODEL,
+                        TitleAnalysis,
+                        TITLE_IDENTIFIER_PROMPT,
+                    ).run_sync(text).output,
                 )
-                time.sleep(TIMEOUT_RETRY_DELAY_SECONDS)
+            )
+        return run_with_transient_retry_and_fallback(self.pacer, "title", candidates, prompt, WINDOW_SECONDS)
 
     def identify(self, document: str) -> TitleAnalysis:
         """Send the document to the LLM to identify all heading changes."""

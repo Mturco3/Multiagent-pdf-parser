@@ -1,29 +1,29 @@
-import time
-
-import httpx
 from pydantic_ai import Agent
-from pydantic_ai.exceptions import ModelHTTPError
 
 from .models import RewriteApprovalResponse, SlideReview, SlideRewrite, SlideType
 from .utilities.model_config import (
+    REVIEWER_FALLBACK_MODEL,
+    REVIEWER_FALLBACK_MODEL_RPD,
+    REVIEWER_FALLBACK_MODEL_RPM,
     REVIEWER_MODEL,
     REVIEWER_MODEL_RPD,
     REVIEWER_MODEL_RPM,
+    REWRITER_FALLBACK_MODEL,
+    REWRITER_FALLBACK_MODEL_RPD,
+    REWRITER_FALLBACK_MODEL_RPM,
     REWRITER_MODEL,
     REWRITER_MODEL_RPD,
     REWRITER_MODEL_RPM,
     WINDOW_SECONDS,
 )
+from .utilities.model_retry import ModelRequestCandidate, get_cached_agent, run_with_transient_retry_and_fallback
 from .utilities.normalizer import normalize
 from .utilities.prompts import REWRITER_SYSTEM_PROMPT, REWRITE_REVIEWER_PROMPT
-from .utilities.rate_limit import DailyQuotaExceededError, RequestPacer
+from .utilities.rate_limit import RequestPacer
 
-rewriter_agent = Agent(REWRITER_MODEL, output_type=str, instructions=REWRITER_SYSTEM_PROMPT, model_settings={"temperature": 0})
-rewrite_reviewer_agent = Agent(REVIEWER_MODEL, output_type=RewriteApprovalResponse, instructions=REWRITE_REVIEWER_PROMPT, model_settings={"temperature": 0})
 MAX_REWRITE_ATTEMPTS = 2
-MAX_MODEL_RETRIES = 3
-TIMEOUT_RETRY_DELAY_SECONDS = 30.0
-TRANSIENT_STATUS_CODES = {429, 500, 503}
+rewriter_agents: dict[str, Agent] = {}
+rewrite_reviewer_agents: dict[str, Agent] = {}
 
 
 class LLMRewriter:
@@ -33,73 +33,66 @@ class LLMRewriter:
         """Initialize the rewriter with rate-limited model access."""
         self.pacer = RequestPacer(WINDOW_SECONDS)
 
-    def get_retry_delay(self, error: ModelHTTPError) -> float:
-        """Extract a provider-suggested retry delay when one is available."""
-        retry_delay = None
-        body = error.body
-        if isinstance(body, dict):
-            error_payload = body.get("error")
-            if isinstance(error_payload, dict):
-                details = error_payload.get("details")
-                if isinstance(details, list):
-                    for detail in details:
-                        if not isinstance(detail, dict):
-                            continue
-                        retry_text = detail.get("retryDelay")
-                        if isinstance(retry_text, str) and retry_text.endswith("s"):
-                            try:
-                                retry_delay = float(retry_text[:-1])
-                                break
-                            except ValueError:
-                                continue
-
-        if retry_delay is not None:
-            return max(retry_delay, 1.0)
-
-        if error.status_code == 429:
-            return float(WINDOW_SECONDS)
-        return 30.0
-
-    def run_with_transient_retry(self, request_name: str, model_name: str, rpm: int, rpd: int, runner, prompt: str):
-        """Call a rewrite-stage model with deterministic pacing and transient retries."""
-        attempt = 0
-        while True:
-            self.pacer.acquire_request_slot(model_name, rpm, rpd, request_name)
-            try:
-                result = runner(prompt)
-                return result.output
-            except ModelHTTPError as error:
-                if error.status_code == 429 and self.pacer.is_daily_quota_error(error.body):
-                    self.pacer.mark_daily_exhausted(model_name, rpd)
-                    raise DailyQuotaExceededError(
-                        f"Provider daily request quota exhausted for {model_name}. "
-                        "Resume after reset or switch this stage to another model."
-                    ) from error
-                if error.status_code not in TRANSIENT_STATUS_CODES or attempt >= MAX_MODEL_RETRIES - 1:
-                    raise
-
-                delay = self.get_retry_delay(error)
-                attempt += 1
-                print(f"{request_name} transient error {error.status_code} - retrying in {delay:.1f}s ({attempt}/{MAX_MODEL_RETRIES})...")
-                time.sleep(delay)
-            except httpx.TimeoutException as error:
-                if attempt >= MAX_MODEL_RETRIES - 1:
-                    raise
-
-                attempt += 1
-                print(
-                    f"{request_name} transient timeout - retrying in "
-                    f"{TIMEOUT_RETRY_DELAY_SECONDS:.1f}s ({attempt}/{MAX_MODEL_RETRIES})..."
-                )
-                time.sleep(TIMEOUT_RETRY_DELAY_SECONDS)
+    def run_agent_request(self, request_name: str, candidates: list[ModelRequestCandidate], prompt: str):
+        """Run a model request with transient retry and 503 fallback handling."""
+        return run_with_transient_retry_and_fallback(self.pacer, request_name, candidates, prompt, WINDOW_SECONDS)
 
     def run_rewriter_request(self, prompt: str) -> str:
         """Call the rewrite model with deterministic pacing and transient retries."""
-        return self.run_with_transient_retry("rewriter", REWRITER_MODEL, REWRITER_MODEL_RPM, REWRITER_MODEL_RPD, rewriter_agent.run_sync, prompt)
+        candidates = [
+            ModelRequestCandidate(
+                REWRITER_MODEL,
+                REWRITER_MODEL_RPM,
+                REWRITER_MODEL_RPD,
+                lambda text: get_cached_agent(rewriter_agents, REWRITER_MODEL, str, REWRITER_SYSTEM_PROMPT).run_sync(text).output,
+            )
+        ]
+        if REWRITER_FALLBACK_MODEL:
+            candidates.append(
+                ModelRequestCandidate(
+                    REWRITER_FALLBACK_MODEL,
+                    REWRITER_FALLBACK_MODEL_RPM,
+                    REWRITER_FALLBACK_MODEL_RPD,
+                    lambda text: get_cached_agent(
+                        rewriter_agents,
+                        REWRITER_FALLBACK_MODEL,
+                        str,
+                        REWRITER_SYSTEM_PROMPT,
+                    ).run_sync(text).output,
+                )
+            )
+        return self.run_agent_request("rewriter", candidates, prompt)
 
     def run_rewrite_review_request(self, prompt: str) -> RewriteApprovalResponse:
         """Call the rewrite reviewer model with deterministic pacing and transient retries."""
-        return self.run_with_transient_retry("rewrite-reviewer", REVIEWER_MODEL, REVIEWER_MODEL_RPM, REVIEWER_MODEL_RPD, rewrite_reviewer_agent.run_sync, prompt)
+        candidates = [
+            ModelRequestCandidate(
+                REVIEWER_MODEL,
+                REVIEWER_MODEL_RPM,
+                REVIEWER_MODEL_RPD,
+                lambda text: get_cached_agent(
+                    rewrite_reviewer_agents,
+                    REVIEWER_MODEL,
+                    RewriteApprovalResponse,
+                    REWRITE_REVIEWER_PROMPT,
+                ).run_sync(text).output,
+            )
+        ]
+        if REVIEWER_FALLBACK_MODEL:
+            candidates.append(
+                ModelRequestCandidate(
+                    REVIEWER_FALLBACK_MODEL,
+                    REVIEWER_FALLBACK_MODEL_RPM,
+                    REVIEWER_FALLBACK_MODEL_RPD,
+                    lambda text: get_cached_agent(
+                        rewrite_reviewer_agents,
+                        REVIEWER_FALLBACK_MODEL,
+                        RewriteApprovalResponse,
+                        REWRITE_REVIEWER_PROMPT,
+                    ).run_sync(text).output,
+                )
+            )
+        return self.run_agent_request("rewrite-reviewer", candidates, prompt)
 
     def build_introduction_output(self, review: SlideReview) -> SlideRewrite | None:
         """Return a heading-only output for introduction slides when possible."""

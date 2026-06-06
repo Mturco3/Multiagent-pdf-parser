@@ -65,6 +65,14 @@ TITLE_MODEL=google:gemini-2.5-flash
 QUALITY_IDENTIFIER_MODEL=google:gemini-2.5-flash
 QUALITY_FIXER_MODEL=google:gemini-2.5-flash
 
+CHECKER_FALLBACK_MODEL=google:gemini-2.5-flash
+REVIEWER_FALLBACK_MODEL=google:gemini-2.5-flash
+REWRITER_FALLBACK_MODEL=google:gemini-2.5-flash
+MATH_FALLBACK_MODEL=google:gemini-2.5-flash
+TITLE_FALLBACK_MODEL=google:gemini-3.1-flash-lite
+QUALITY_IDENTIFIER_FALLBACK_MODEL=google:gemini-3.1-flash-lite
+QUALITY_FIXER_FALLBACK_MODEL=google:gemini-3.1-flash-lite
+
 LIGHT_MODEL=google:gemma-4-26b
 
 CHECKER_MODEL_RPM=15
@@ -81,9 +89,12 @@ QUALITY_IDENTIFIER_MODEL_RPM=5
 QUALITY_IDENTIFIER_MODEL_RPD=20
 QUALITY_FIXER_MODEL_RPM=5
 QUALITY_FIXER_MODEL_RPD=20
+
+CHECKER_FALLBACK_MODEL_RPM=5
+CHECKER_FALLBACK_MODEL_RPD=20
 ```
 
-Known model families and their default request budgets are defined in `src/utilities/model_config.py`, including the Gemma option. To try Gemma for high-volume structured stages, set `LIGHT_MODEL` to the Gemma model ID available in your Google account, or set the individual checker/reviewer/rewriter/math variables directly. The pipeline tracks a local per-model daily request budget in `cache/_model_usage.json`, writes a readable request log to `request_logs/model_requests.csv`, prints both `rpm` and `rpd` at startup, and stops cleanly before a configured budget is exceeded.
+Known model families and their default request budgets are defined in `src/utilities/model_config.py`, including the Gemma option. To try Gemma for high-volume structured stages, set `LIGHT_MODEL` to the Gemma model ID available in your Google account, or set the individual checker/reviewer/rewriter/math variables directly. Each stage can also define a fallback model. After 3 consecutive HTTP 503 responses from the primary model, the request is retried on the fallback model automatically. The pipeline tracks a local per-model daily request budget in `cache/_model_usage.json`, writes a readable request log to `request_logs/model_requests.csv`, prints both `rpm` and `rpd` at startup, and stops cleanly before a configured budget is exceeded.
 
 ## Usage
 
@@ -103,6 +114,18 @@ Or pass the path directly:
 
 ```sh
 python main.py path/to/slides.pdf
+```
+
+For Windows paths with spaces, quote the PDF path:
+
+```sh
+python main.py "C:\Users\miche\University\Material\Data Science\Data Visualization\Slides\13_Dimensionality_Reduction.pdf"
+```
+
+To force a fresh run for that PDF and ignore existing cache:
+
+```sh
+python main.py --clear-cache "C:\Users\miche\University\Material\Data Science\Data Visualization\Slides\13_Dimensionality_Reduction.pdf"
 ```
 
 Output is saved to `cache/<pdf_name>/<pdf_name>.md`.

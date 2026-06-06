@@ -91,6 +91,70 @@ TITLE_MODEL = get_env_text("TITLE_MODEL", FULL_TEXT_MODEL)
 QUALITY_IDENTIFIER_MODEL = get_env_text("QUALITY_IDENTIFIER_MODEL", FULL_TEXT_MODEL)
 QUALITY_FIXER_MODEL = get_env_text("QUALITY_FIXER_MODEL", FULL_TEXT_MODEL)
 
+
+def get_default_fallback_model(primary_model: str, alternate_model: str) -> str | None:
+    """Return a useful fallback model when it differs from the primary model."""
+    if normalize_model_name(primary_model) == normalize_model_name(alternate_model):
+        return None
+    return alternate_model
+
+
+def get_env_optional_text(name: str, default: str | None = None) -> str | None:
+    """Return a trimmed optional environment override."""
+    value = os.getenv(name)
+    if value is None:
+        return default
+
+    value = value.strip()
+    return value or default
+
+
+def get_stage_fallback_model(env_name: str, primary_model: str, default_model: str | None) -> str | None:
+    """Return a stage fallback model, disabling no-op fallbacks to the primary model."""
+    fallback_model = get_env_optional_text(env_name, default_model)
+    if fallback_model is None:
+        return None
+    if normalize_model_name(fallback_model) == normalize_model_name(primary_model):
+        return None
+    return fallback_model
+
+
+CHECKER_FALLBACK_MODEL = get_stage_fallback_model(
+    "CHECKER_FALLBACK_MODEL",
+    CHECKER_MODEL,
+    get_default_fallback_model(CHECKER_MODEL, FULL_TEXT_MODEL),
+)
+REVIEWER_FALLBACK_MODEL = get_stage_fallback_model(
+    "REVIEWER_FALLBACK_MODEL",
+    REVIEWER_MODEL,
+    get_default_fallback_model(REVIEWER_MODEL, FULL_TEXT_MODEL),
+)
+REWRITER_FALLBACK_MODEL = get_stage_fallback_model(
+    "REWRITER_FALLBACK_MODEL",
+    REWRITER_MODEL,
+    get_default_fallback_model(REWRITER_MODEL, FULL_TEXT_MODEL),
+)
+MATH_FALLBACK_MODEL = get_stage_fallback_model(
+    "MATH_FALLBACK_MODEL",
+    MATH_MODEL,
+    get_default_fallback_model(MATH_MODEL, FULL_TEXT_MODEL),
+)
+TITLE_FALLBACK_MODEL = get_stage_fallback_model(
+    "TITLE_FALLBACK_MODEL",
+    TITLE_MODEL,
+    get_default_fallback_model(TITLE_MODEL, LIGHT_MODEL),
+)
+QUALITY_IDENTIFIER_FALLBACK_MODEL = get_stage_fallback_model(
+    "QUALITY_IDENTIFIER_FALLBACK_MODEL",
+    QUALITY_IDENTIFIER_MODEL,
+    get_default_fallback_model(QUALITY_IDENTIFIER_MODEL, LIGHT_MODEL),
+)
+QUALITY_FIXER_FALLBACK_MODEL = get_stage_fallback_model(
+    "QUALITY_FIXER_FALLBACK_MODEL",
+    QUALITY_FIXER_MODEL,
+    get_default_fallback_model(QUALITY_FIXER_MODEL, LIGHT_MODEL),
+)
+
 FULL_TEXT_RPM = get_env_int("FULL_TEXT_RPM", get_default_model_limits(FULL_TEXT_MODEL)[0], minimum=0)
 
 
@@ -121,14 +185,68 @@ QUALITY_IDENTIFIER_MODEL_RPD = get_model_rpd(QUALITY_IDENTIFIER_MODEL, "QUALITY_
 QUALITY_FIXER_MODEL_RPD = get_model_rpd(QUALITY_FIXER_MODEL, "QUALITY_FIXER_MODEL_RPD")
 
 
+def get_fallback_rpm(model_name: str | None, env_name: str) -> int:
+    """Return a fallback model's rpm budget, or zero when disabled."""
+    if model_name is None:
+        return 0
+    return get_env_int(env_name, get_default_model_limits(model_name)[0], minimum=0)
+
+
+def get_fallback_rpd(model_name: str | None, env_name: str) -> int:
+    """Return a fallback model's rpd budget, or zero when disabled."""
+    if model_name is None:
+        return 0
+    return get_env_int(env_name, get_default_model_limits(model_name)[1], minimum=0)
+
+
+CHECKER_FALLBACK_MODEL_RPM = get_fallback_rpm(CHECKER_FALLBACK_MODEL, "CHECKER_FALLBACK_MODEL_RPM")
+REVIEWER_FALLBACK_MODEL_RPM = get_fallback_rpm(REVIEWER_FALLBACK_MODEL, "REVIEWER_FALLBACK_MODEL_RPM")
+REWRITER_FALLBACK_MODEL_RPM = get_fallback_rpm(REWRITER_FALLBACK_MODEL, "REWRITER_FALLBACK_MODEL_RPM")
+MATH_FALLBACK_MODEL_RPM = get_fallback_rpm(MATH_FALLBACK_MODEL, "MATH_FALLBACK_MODEL_RPM")
+TITLE_FALLBACK_MODEL_RPM = get_fallback_rpm(TITLE_FALLBACK_MODEL, "TITLE_FALLBACK_MODEL_RPM")
+QUALITY_IDENTIFIER_FALLBACK_MODEL_RPM = get_fallback_rpm(
+    QUALITY_IDENTIFIER_FALLBACK_MODEL,
+    "QUALITY_IDENTIFIER_FALLBACK_MODEL_RPM",
+)
+QUALITY_FIXER_FALLBACK_MODEL_RPM = get_fallback_rpm(QUALITY_FIXER_FALLBACK_MODEL, "QUALITY_FIXER_FALLBACK_MODEL_RPM")
+
+CHECKER_FALLBACK_MODEL_RPD = get_fallback_rpd(CHECKER_FALLBACK_MODEL, "CHECKER_FALLBACK_MODEL_RPD")
+REVIEWER_FALLBACK_MODEL_RPD = get_fallback_rpd(REVIEWER_FALLBACK_MODEL, "REVIEWER_FALLBACK_MODEL_RPD")
+REWRITER_FALLBACK_MODEL_RPD = get_fallback_rpd(REWRITER_FALLBACK_MODEL, "REWRITER_FALLBACK_MODEL_RPD")
+MATH_FALLBACK_MODEL_RPD = get_fallback_rpd(MATH_FALLBACK_MODEL, "MATH_FALLBACK_MODEL_RPD")
+TITLE_FALLBACK_MODEL_RPD = get_fallback_rpd(TITLE_FALLBACK_MODEL, "TITLE_FALLBACK_MODEL_RPD")
+QUALITY_IDENTIFIER_FALLBACK_MODEL_RPD = get_fallback_rpd(
+    QUALITY_IDENTIFIER_FALLBACK_MODEL,
+    "QUALITY_IDENTIFIER_FALLBACK_MODEL_RPD",
+)
+QUALITY_FIXER_FALLBACK_MODEL_RPD = get_fallback_rpd(QUALITY_FIXER_FALLBACK_MODEL, "QUALITY_FIXER_FALLBACK_MODEL_RPD")
+
+
 def get_model_summary() -> list[tuple[str, str, int, int]]:
     """Return the active stage model configuration in display order."""
     return [
         ("checker", CHECKER_MODEL, CHECKER_MODEL_RPM, CHECKER_MODEL_RPD),
+        ("checker_fallback", CHECKER_FALLBACK_MODEL or "(disabled)", CHECKER_FALLBACK_MODEL_RPM, CHECKER_FALLBACK_MODEL_RPD),
         ("reviewer", REVIEWER_MODEL, REVIEWER_MODEL_RPM, REVIEWER_MODEL_RPD),
+        ("reviewer_fallback", REVIEWER_FALLBACK_MODEL or "(disabled)", REVIEWER_FALLBACK_MODEL_RPM, REVIEWER_FALLBACK_MODEL_RPD),
         ("rewriter", REWRITER_MODEL, REWRITER_MODEL_RPM, REWRITER_MODEL_RPD),
+        ("rewriter_fallback", REWRITER_FALLBACK_MODEL or "(disabled)", REWRITER_FALLBACK_MODEL_RPM, REWRITER_FALLBACK_MODEL_RPD),
         ("math", MATH_MODEL, MATH_MODEL_RPM, MATH_MODEL_RPD),
+        ("math_fallback", MATH_FALLBACK_MODEL or "(disabled)", MATH_FALLBACK_MODEL_RPM, MATH_FALLBACK_MODEL_RPD),
         ("title", TITLE_MODEL, TITLE_MODEL_RPM, TITLE_MODEL_RPD),
+        ("title_fallback", TITLE_FALLBACK_MODEL or "(disabled)", TITLE_FALLBACK_MODEL_RPM, TITLE_FALLBACK_MODEL_RPD),
         ("quality_identifier", QUALITY_IDENTIFIER_MODEL, QUALITY_IDENTIFIER_MODEL_RPM, QUALITY_IDENTIFIER_MODEL_RPD),
+        (
+            "quality_id_fallback",
+            QUALITY_IDENTIFIER_FALLBACK_MODEL or "(disabled)",
+            QUALITY_IDENTIFIER_FALLBACK_MODEL_RPM,
+            QUALITY_IDENTIFIER_FALLBACK_MODEL_RPD,
+        ),
         ("quality_fixer", QUALITY_FIXER_MODEL, QUALITY_FIXER_MODEL_RPM, QUALITY_FIXER_MODEL_RPD),
+        (
+            "quality_fix_fallback",
+            QUALITY_FIXER_FALLBACK_MODEL or "(disabled)",
+            QUALITY_FIXER_FALLBACK_MODEL_RPM,
+            QUALITY_FIXER_FALLBACK_MODEL_RPD,
+        ),
     ]
