@@ -27,22 +27,23 @@ class Transcriber:
         print("=" * 60)
 
         pdf_document = fitz.open(self.pdf_path)
-        total = len(pdf_document)
-        expected_filenames = {f"slide_{slide_number:03d}.txt" for slide_number in range(1, total + 1)}
+        try:
+            total = len(pdf_document)
+            expected_filenames = {f"slide_{slide_number:03d}.txt" for slide_number in range(1, total + 1)}
 
-        for filename in os.listdir(output_dir):
-            if filename.startswith("slide_") and filename.endswith(".txt") and filename not in expected_filenames:
-                os.remove(os.path.join(output_dir, filename))
+            for filename in os.listdir(output_dir):
+                if filename.startswith("slide_") and filename.endswith(".txt") and filename not in expected_filenames:
+                    os.remove(os.path.join(output_dir, filename))
 
-        for page_index, page in enumerate(pdf_document):
-            slide_number = page_index + 1
-            slide_text = page.get_text().strip()
-            slide_path = os.path.join(output_dir, f"slide_{slide_number:03d}.txt")
-            with open(slide_path, "w", encoding="utf-8") as file_handle:
-                file_handle.write(slide_text)
-            print(f"[{slide_number}/{total}] -> {os.path.basename(slide_path)}")
-
-        pdf_document.close()
+            for page_index, page in enumerate(pdf_document):
+                slide_number = page_index + 1
+                slide_text = page.get_text().strip()
+                slide_path = os.path.join(output_dir, f"slide_{slide_number:03d}.txt")
+                with open(slide_path, "w", encoding="utf-8") as file_handle:
+                    file_handle.write(slide_text)
+                print(f"[{slide_number}/{total}] -> {os.path.basename(slide_path)}")
+        finally:
+            pdf_document.close()
         print("=" * 60)
         print(f"[OK] {total} slides written to cache/{pdf_name}/transcriptions/")
         print("=" * 60)

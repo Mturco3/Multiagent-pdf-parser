@@ -26,12 +26,29 @@ class Pipeline:
     def __init__(self, pdf_path: str, clear_cache: bool = False):
         """Initialize the pipeline for a single input PDF."""
         self.pdf_path = pdf_path
-        self.pdf_name = os.path.splitext(os.path.basename(pdf_path))[0]
+        self.pdf_name = os.path.splitext(os.path.basename(os.path.normpath(pdf_path)))[0]
         self.cache_dir = os.path.join(CACHE_DIR, self.pdf_name)
         self.clear_cache = clear_cache
 
+    def validate_input_pdf(self):
+        """Fail before cache mutation when the configured input is not a readable PDF file."""
+        if not self.pdf_name:
+            raise ValueError("Input PDF path must include a file name.")
+
+        if not os.path.isfile(self.pdf_path):
+            raise FileNotFoundError(f"PDF not found: {self.pdf_path}")
+
+    def ensure_safe_cache_target(self):
+        """Make sure destructive cache operations stay inside this project's cache root."""
+        cache_root = os.path.abspath(CACHE_DIR)
+        target_dir = os.path.abspath(self.cache_dir)
+
+        if target_dir == cache_root or os.path.commonpath([cache_root, target_dir]) != cache_root:
+            raise ValueError(f"Refusing to clear unsafe cache path: {target_dir}")
+
     def reset_pdf_cache(self):
         """Remove only this PDF's cache directory before a fresh run."""
+        self.ensure_safe_cache_target()
         if not os.path.exists(self.cache_dir):
             return
 
@@ -295,6 +312,8 @@ class Pipeline:
 
     def run(self):
         """Execute the full pipeline and save the final markdown file."""
+        self.validate_input_pdf()
+
         if self.clear_cache:
             self.reset_pdf_cache()
 
