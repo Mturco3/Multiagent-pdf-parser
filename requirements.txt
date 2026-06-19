@@ -1,18 +1,7 @@
 # Core dependencies
 pymupdf
-pdfplumber
-pdf2image
-camelot-py[cv]
-nltk
-Pillow
-markdown
-langchain
-openai
-crewai
-groq
-flask
 pydantic
 pydantic-ai
+httpx
 PyYAML
 python-dotenv
-werkzeug
