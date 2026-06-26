@@ -6,18 +6,28 @@ import shutil
 
 from .checker import LLMChecker
 from .math_formatter import MathFormatter
-from .models import QualityReport, SlideReview, SlideRewrite, SlideType, TitleAnalysis
+from .models import MathReplacementResponse, QualityReport, SlideReview, SlideRewrite, SlideType, TitleAnalysis
 from .quality_checker import QualityChecker
 from .rewriter import LLMRewriter
 from .title_editor import TitleEditor
 from .transcriber import CACHE_DIR, Transcriber
 from .utilities.model_config import WINDOW_SECONDS, get_model_summary
+from .utilities.prompts import (
+    CHECKER_REVIEWER_PROMPT,
+    CHECKER_SYSTEM_PROMPT,
+    MATH_FORMATTER_PROMPT,
+    QUALITY_CHECKER_PROMPT,
+    REWRITE_REVIEWER_PROMPT,
+    REWRITER_SYSTEM_PROMPT,
+    TITLE_IDENTIFIER_PROMPT,
+)
 
 REWRITE_CACHE_MODES = {
     "rewrite_review_v2",
     "deterministic_passthrough_v2",
     "introduction_heading_v2",
 }
+CACHE_SOURCE_VERSION = "pipeline_cache_sources_v1"
 
 
 class Pipeline:
@@ -70,6 +80,60 @@ class Pipeline:
             else:
                 source_parts.append(json.dumps(part, sort_keys=True, ensure_ascii=False))
         return "\n--- cache-source-part ---\n".join(source_parts)
+
+    def get_review_cache_source(self, slide_text: str) -> str:
+        """Return the source fingerprint input for checker/reviewer review artifacts."""
+        return self.get_cache_source(
+            CACHE_SOURCE_VERSION,
+            "review",
+            CHECKER_SYSTEM_PROMPT,
+            CHECKER_REVIEWER_PROMPT,
+            SlideReview.model_json_schema(),
+            slide_text,
+        )
+
+    def get_rewrite_cache_source(self, slide_text: str, review: SlideReview) -> str:
+        """Return the source fingerprint input for rewritten slide artifacts."""
+        return self.get_cache_source(
+            CACHE_SOURCE_VERSION,
+            "rewrite",
+            REWRITER_SYSTEM_PROMPT,
+            REWRITE_REVIEWER_PROMPT,
+            SlideRewrite.model_json_schema(),
+            slide_text,
+            review.model_dump(mode="json"),
+        )
+
+    def get_math_cache_source(self, slide: SlideRewrite) -> str:
+        """Return the source fingerprint input for math-formatted slide artifacts."""
+        return self.get_cache_source(
+            CACHE_SOURCE_VERSION,
+            "math",
+            MATH_FORMATTER_PROMPT,
+            MathReplacementResponse.model_json_schema(),
+            SlideRewrite.model_json_schema(),
+            slide.model_dump(mode="json"),
+        )
+
+    def get_title_cache_source(self, document: str) -> str:
+        """Return the source fingerprint input for title-analysis artifacts."""
+        return self.get_cache_source(
+            CACHE_SOURCE_VERSION,
+            "title",
+            TITLE_IDENTIFIER_PROMPT,
+            TitleAnalysis.model_json_schema(),
+            document,
+        )
+
+    def get_quality_cache_source(self, document: str) -> str:
+        """Return the source fingerprint input for quality-report artifacts."""
+        return self.get_cache_source(
+            CACHE_SOURCE_VERSION,
+            "quality",
+            QUALITY_CHECKER_PROMPT,
+            QualityReport.model_json_schema(),
+            document,
+        )
 
     def save_json(self, name: str, data, source_text: str | None = None):
         """Save a JSON-serializable object in the PDF cache directory."""
@@ -391,14 +455,15 @@ class Pipeline:
         reviews: list[SlideReview] = []
         for index, (slide_number, text) in enumerate(slides, start=1):
             print(f"[{slide_number}/{total}]", end=" ", flush=True)
-            cached_review = self.load_review_json(reviews_dir, slide_number, text)
+            review_source = self.get_review_cache_source(text)
+            cached_review = self.load_review_json(reviews_dir, slide_number, review_source)
             if cached_review is not None:
                 print(f"cached - {cached_review.slide_type.value}")
                 reviews.append(cached_review)
                 continue
 
             review = checker.check_one(slide_number, text)
-            self.save_review_json(reviews_dir, review, text)
+            self.save_review_json(reviews_dir, review, review_source)
             reviews.append(review)
 
         print("\n" + "=" * 60)
@@ -419,7 +484,7 @@ class Pipeline:
         """Run the rewriter step or load exact cached rewrites."""
         review_by_number = {review.slide_number: review for review in reviews}
         source_by_number = {
-            slide_number: self.get_cache_source(text, review_by_number[slide_number].model_dump(mode="json"))
+            slide_number: self.get_rewrite_cache_source(text, review_by_number[slide_number])
             for slide_number, text in slides
             if slide_number in output_slide_numbers
         }
@@ -495,7 +560,7 @@ class Pipeline:
     def _run_math_formatter(self, slides: list[SlideRewrite], output_slide_numbers: list[int]) -> list[SlideRewrite]:
         """Run the math formatter step or load exact cached results."""
         source_by_number = {
-            slide.slide_number: self.get_cache_source(slide.model_dump(mode="json"))
+            slide.slide_number: self.get_math_cache_source(slide)
             for slide in slides
         }
 
@@ -560,7 +625,8 @@ class Pipeline:
         print("=" * 60)
 
         title_editor = TitleEditor()
-        cached_analysis = self.load_json("title_analysis", document)
+        title_source = self.get_title_cache_source(document)
+        cached_analysis = self.load_json("title_analysis", title_source)
         if cached_analysis:
             print("Loading cached title analysis")
             analysis = TitleAnalysis(**cached_analysis)
@@ -568,7 +634,7 @@ class Pipeline:
             print(f"Waiting {WINDOW_SECONDS}s before title editing step...")
             time.sleep(WINDOW_SECONDS)
             analysis = title_editor.edit(document)
-            self.save_json("title_analysis", analysis.model_dump(), document)
+            self.save_json("title_analysis", analysis.model_dump(), title_source)
 
         document = title_editor.apply(document, analysis)
         return document
@@ -581,7 +647,8 @@ class Pipeline:
 
         quality_checker = QualityChecker()
         document = quality_checker.sanitize_document(document)
-        cached_report = self.load_json("quality_report", document)
+        quality_source = self.get_quality_cache_source(document)
+        cached_report = self.load_json("quality_report", quality_source)
         if cached_report:
             print("Loading cached quality report")
             report = QualityReport(**cached_report)
@@ -590,7 +657,7 @@ class Pipeline:
             time.sleep(WINDOW_SECONDS)
             try:
                 report = quality_checker.check(document)
-                self.save_json("quality_report", report.model_dump(), document)
+                self.save_json("quality_report", report.model_dump(), quality_source)
             except Exception as error:
                 print(f"[warn] Quality checker model failed; using deterministic cleanup only ({error})")
                 report = QualityReport(issues=[])

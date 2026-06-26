@@ -10,6 +10,7 @@ build/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+.test_tmp/
 pdf_parser/
 .env
 .vscode/

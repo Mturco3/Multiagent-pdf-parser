@@ -1,5 +1,4 @@
 import os
-import fitz
 
 CACHE_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "cache")
 
@@ -13,6 +12,8 @@ class Transcriber:
 
     def run(self) -> str:
         """Extract all slides and write them to the cache directory."""
+        import fitz
+
         if not os.path.isfile(self.pdf_path):
             raise FileNotFoundError(f"PDF not found: {self.pdf_path}")
 
