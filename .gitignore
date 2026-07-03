@@ -11,9 +11,12 @@ build/
 .ruff_cache/
 .mypy_cache/
 .test_tmp/
+.test_tmp_write_check/
+test_tmp_write_check/
 pdf_parser/
 .env
 .vscode/
+CLAUDE.md
 
 # Jupyter Notebooks
 .ipynb_checkpoints/

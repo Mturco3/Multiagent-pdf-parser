@@ -125,20 +125,7 @@ class QualityChecker:
 
     def remove_raw_slide_metadata(self, text: str) -> str:
         """Remove repeated slide footer/source artifacts that are not lecture-note content."""
-        metadata_patterns = [
-            r"\bData Visualisation\s*/\s*Blerina Sinaimeri\b",
-            r"\bAdvanced Visualisations\s*/\s*Blerina Sinaimeri\b",
-            r"\bData Visualisation\b",
-            r"\bAdvanced Visualisations\b",
-            r"\bBlerina Sinaimeri\b",
-            r"\bNetworkX\b",
-            r"[- ]*L\.\s*Barab\S*\s*,\s*Network Science:\s*Communities\.?",
-        ]
-
-        cleaned = text
-        for pattern in metadata_patterns:
-            cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE)
-        return cleaned
+        return text
 
     def remove_validation_artifacts(self, text: str) -> str:
         """Remove leaked provider/retry text that can appear when an LLM returns diagnostics."""

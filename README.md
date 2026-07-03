@@ -4,15 +4,51 @@ Converts PDF lecture slides into polished, readable university notes as a single
 
 ## Pipeline
 
-1. **Transcriber** - extracts text from each PDF page using PyMuPDF.
-2. **Checker** - classifies each slide and identifies a structured action plan.
-3. **Reviewer** - approves or rejects the proposed action plan before any slide rewrite is allowed.
-4. **Rewriter** - rewrites each slide only from the approved actions, preserving all original content. Passes previous paragraph for flow continuity.
-5. **Math Formatter** - identifies mathematical expressions and converts them to LaTeX (`$inline$` and `$$display$$`).
-6. **Title Editor** - assigns heading hierarchy (`##`, `###`, `####`) and removes redundant titles.
-7. **Quality Checker** - reviews the final document and flags issues (collapsed lists, dangling references, content loss, repetition).
+```
+PDF file
+  |
+  v
++------------------+     cache/<name>/transcriptions/slide_NNN.txt
+|   Transcriber    |---> (one .txt per page, raw text extraction via PyMuPDF)
++------------------+
+  |
+  v
++------------------+     cache/<name>/reviews/slide_NNN_review.json
+|   Checker        |---> (LLM classifies slide type, extracts title, suggests actions)
+|   + Reviewer     |     (reviewer approves/rejects plan; up to 3 attempts)
++------------------+     skips: course_info, image_description, outline slides
+  |
+  v
++------------------+     cache/<name>/rewrites/slide_NNN.json
+|   Rewriter       |---> (LLM rewrites text applying approved actions)
+|   + Reviewer     |     (receives previous paragraph for flow continuity)
++------------------+     unapproved slides fall back to deterministic passthrough
+  |
+  v
++------------------+     cache/<name>/math/slide_NNN.json
+|  Math Formatter  |---> (LLM finds math expressions, converts to LaTeX)
++------------------+
+  |
+  v
++------------------+
+|    Assemble      |---> concatenate slides into one markdown document
++------------------+     (deduplicate titles, handle continuations)
+  |
+  v
++------------------+     cache/<name>/title_analysis.json
+|  Title Editor    |---> (LLM analyzes headings, assigns hierarchy ##/###/####)
++------------------+
+  |
+  v
++------------------+     cache/<name>/quality_report.json
+| Quality Checker  |---> (LLM spots issues, applies targeted fixes)
++------------------+
+  |
+  v
+cache/<name>/<name>.md   (final output)
+```
 
-Each step's output is cached so the pipeline can resume from where it left off if a step fails. Reviews and math artifacts are also checkpointed per slide.
+Each step's output is cached with source-hash fingerprinting so the pipeline can resume from where it left off. Changing a prompt or model schema automatically invalidates stale cache entries. Reviews, rewrites, and math artifacts are checkpointed per slide.
 
 ## Project Structure
 
@@ -53,48 +89,15 @@ cache/                   Intermediate and final outputs per PDF
    GOOGLE_API_KEY=your_google_api_key
    ```
 
-Optional stage-specific model overrides can also go in `.env`:
+All stages default to `google:gemma-4-26b` (15 RPM, unlimited tokens, 1500 RPD on the free tier). After 3 consecutive HTTP 503 responses, the pipeline automatically falls back to `google:gemma-4-31b`. Override any stage via `.env`:
 
 ```env
-FULL_TEXT_MODEL=google:gemini-2.5-flash
-CHECKER_MODEL=google:gemini-3.1-flash-lite
-REVIEWER_MODEL=google:gemini-3.1-flash-lite
-REWRITER_MODEL=google:gemini-3.1-flash-lite
-MATH_MODEL=google:gemini-3.1-flash-lite
+CHECKER_MODEL=google:gemma-4-26b
+REWRITER_MODEL=google:gemma-4-31b
 TITLE_MODEL=google:gemini-2.5-flash
-QUALITY_IDENTIFIER_MODEL=google:gemini-2.5-flash
-QUALITY_FIXER_MODEL=google:gemini-2.5-flash
-
-CHECKER_FALLBACK_MODEL=google:gemini-2.5-flash
-REVIEWER_FALLBACK_MODEL=google:gemini-2.5-flash
-REWRITER_FALLBACK_MODEL=google:gemini-2.5-flash
-MATH_FALLBACK_MODEL=google:gemini-2.5-flash
-TITLE_FALLBACK_MODEL=google:gemini-3.1-flash-lite
-QUALITY_IDENTIFIER_FALLBACK_MODEL=google:gemini-3.1-flash-lite
-QUALITY_FIXER_FALLBACK_MODEL=google:gemini-3.1-flash-lite
-
-LIGHT_MODEL=google:gemma-4-26b
-
-CHECKER_MODEL_RPM=15
-CHECKER_MODEL_RPD=500
-REVIEWER_MODEL_RPM=15
-REVIEWER_MODEL_RPD=500
-REWRITER_MODEL_RPM=15
-REWRITER_MODEL_RPD=500
-MATH_MODEL_RPM=15
-MATH_MODEL_RPD=500
-TITLE_MODEL_RPM=5
-TITLE_MODEL_RPD=20
-QUALITY_IDENTIFIER_MODEL_RPM=5
-QUALITY_IDENTIFIER_MODEL_RPD=20
-QUALITY_FIXER_MODEL_RPM=5
-QUALITY_FIXER_MODEL_RPD=20
-
-CHECKER_FALLBACK_MODEL_RPM=5
-CHECKER_FALLBACK_MODEL_RPD=20
 ```
 
-Known model families and their default request budgets are defined in `src/utilities/model_config.py`, including the Gemma option. To try Gemma for high-volume structured stages, set `LIGHT_MODEL` to the Gemma model ID available in your Google account, or set the individual checker/reviewer/rewriter/math variables directly. Each stage can also define a fallback model. After 3 consecutive HTTP 503 responses from the primary model, the request is retried on the fallback model automatically. The pipeline tracks a local per-model daily request budget in `cache/_model_usage.json`, writes a readable request log to `request_logs/model_requests.csv`, prints both `rpm` and `rpd` at startup, and stops cleanly before a configured budget is exceeded.
+The pipeline tracks a local per-model daily request budget in `cache/_model_usage.json`, writes a readable request log to `request_logs/model_requests.csv`, prints both `rpm` and `rpd` at startup, and stops cleanly before a configured budget is exceeded. Known model families and their default limits are defined in `src/utilities/model_config.py`.
 
 ## Usage
 

@@ -3,9 +3,8 @@ from dataclasses import dataclass
 
 WINDOW_SECONDS = 60
 
-DEFAULT_LIGHT_MODEL = "google:gemini-3.1-flash-lite"
-DEFAULT_FULL_TEXT_MODEL = "google:gemini-2.5-flash"
-DEFAULT_GEMMA_LIGHT_MODEL = "google:gemma-4-26b"
+DEFAULT_LIGHT_MODEL = "google:gemma-4-26b"
+DEFAULT_FULL_TEXT_MODEL = "google:gemma-4-26b"
 DEFAULT_MODEL_RPM = 10
 DEFAULT_MODEL_RPD = 1000
 
