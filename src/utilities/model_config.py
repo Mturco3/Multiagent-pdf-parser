@@ -3,8 +3,8 @@ from dataclasses import dataclass
 
 WINDOW_SECONDS = 60
 
-DEFAULT_LIGHT_MODEL = "google:gemma-4-26b"
-DEFAULT_FULL_TEXT_MODEL = "google:gemma-4-26b"
+DEFAULT_LIGHT_MODEL = "google:gemma-4-26b-a4b-it"
+DEFAULT_FULL_TEXT_MODEL = "google:gemma-4-26b-a4b-it"
 DEFAULT_MODEL_RPM = 10
 DEFAULT_MODEL_RPD = 1000
 
@@ -30,7 +30,7 @@ MODEL_LIMITS = (
     ModelLimit("Gemini 2 Flash Lite", ("gemini-2.0-flash-lite", "gemini-2-flash-lite"), 0, 0),
     ModelLimit("Gemini 2 Flash", ("gemini-2.0-flash", "gemini-2-flash"), 0, 0),
     ModelLimit("Gemma 4 31B", ("gemma-4-31b", "gemma-4-31b-it"), 15, 1500),
-    ModelLimit("Gemma 4 26B", ("gemma-4-26b", "gemma-4-26b-it"), 15, 1500),
+    ModelLimit("Gemma 4 26B", ("gemma-4-26b", "gemma-4-26b-it", "gemma-4-26b-a4b-it"), 15, 1500),
     ModelLimit("Gemma", ("gemma",), 15, 1500),
 )
 
