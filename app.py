@@ -2,6 +2,7 @@ import io
 import os
 import sys
 import tempfile
+import threading
 import contextlib
 
 import streamlit as st
@@ -19,6 +20,28 @@ st.title("Lecture Notes Generator")
 st.caption("Upload PDF lecture slides and convert them into polished Markdown notes.")
 
 
+class StreamlitLogStream:
+    """Writable stream that captures text and updates a Streamlit container live."""
+
+    def __init__(self, container):
+        """Initialize with a Streamlit container for live log display."""
+        self.container = container
+        self.buffer = io.StringIO()
+
+    def write(self, text):
+        """Append text to the buffer and refresh the displayed log."""
+        self.buffer.write(text)
+        self.container.code(self.buffer.getvalue(), language="text")
+
+    def flush(self):
+        """No-op flush to satisfy the stream interface."""
+        pass
+
+    def getvalue(self):
+        """Return the full captured log text."""
+        return self.buffer.getvalue()
+
+
 uploaded_file = st.file_uploader("Upload a PDF", type=["pdf"])
 clear_cache = st.checkbox("Clear cache before running", value=False)
 
@@ -30,98 +53,41 @@ if uploaded_file is not None:
         with open(temp_pdf, "wb") as f:
             f.write(uploaded_file.getbuffer())
 
-        log_area = st.empty()
-        progress_bar = st.progress(0, text="Starting pipeline...")
+        # Live log area
+        log_expander = st.expander("Pipeline Log", expanded=True)
+        log_container = log_expander.empty()
+        log_stream = StreamlitLogStream(log_container)
 
-        from src.pipeline import Pipeline
+        result = {}
 
-        pipeline = Pipeline(temp_pdf, clear_cache=clear_cache)
+        def thread_target():
+            """Execute the pipeline on a dedicated thread with stdout redirected."""
+            try:
+                with contextlib.redirect_stdout(log_stream):
+                    from src.pipeline import Pipeline
+                    pipeline = Pipeline(temp_pdf, clear_cache=clear_cache)
+                    pipeline.run()
+                    result["pipeline"] = pipeline
+            except Exception as error:
+                result["error"] = error
 
-        # Capture stdout to show pipeline logs
-        log_output = io.StringIO()
+        with st.spinner("Running pipeline (this takes several minutes)..."):
+            worker = threading.Thread(target=thread_target)
+            worker.start()
+            worker.join()
 
-        stages = [
-            ("validate_input_pdf", "Validating PDF...", 0.02),
-            ("reset_pdf_cache", "Clearing cache...", 0.05),
-        ]
+        if "error" in result:
+            st.error(f"Pipeline failed: {result['error']}")
+        elif "pipeline" in result:
+            pipeline = result["pipeline"]
+            output_path = os.path.join(pipeline.cache_dir, f"{pipeline.pdf_name}.md")
+            with open(output_path, encoding="utf-8") as fh:
+                document = fh.read()
 
-        try:
-            pipeline.validate_input_pdf()
-            progress_bar.progress(0.02, text="PDF validated")
-
-            if clear_cache:
-                pipeline.reset_pdf_cache()
-
-            os.makedirs(pipeline.cache_dir, exist_ok=True)
-
-            # Transcribe
-            progress_bar.progress(0.05, text="Transcribing slides...")
-            from src.transcriber import Transcriber
-            transcriber = Transcriber(temp_pdf)
-            with contextlib.redirect_stdout(log_output):
-                transcriptions_dir = transcriber.run()
-
-            # Load slides
-            slide_filenames = sorted([
-                name for name in os.listdir(transcriptions_dir)
-                if name.startswith("slide_") and name.endswith(".txt")
-            ])
-
-            if not slide_filenames:
-                st.error("No slides found in the PDF.")
-                st.stop()
-
-            slides = []
-            for filename in slide_filenames:
-                slide_number = pipeline.get_slide_number(filename)
-                filepath = os.path.join(transcriptions_dir, filename)
-                with open(filepath, encoding="utf-8") as fh:
-                    slides.append((slide_number, fh.read()))
-
-            total = len(slides)
-            st.info(f"Found {total} slides")
-
-            # Checker
-            progress_bar.progress(0.15, text=f"Running LLM Checker on {total} slides...")
-            reviews_dir = os.path.join(pipeline.cache_dir, "reviews")
-            os.makedirs(reviews_dir, exist_ok=True)
-            with contextlib.redirect_stdout(log_output):
-                reviews = pipeline._run_checker(slides, reviews_dir, total)
-
-            output_slide_numbers = pipeline.get_output_slide_numbers(reviews)
-            content_count = len(output_slide_numbers)
-            skipped_count = total - content_count
-            st.info(f"Checker done: {content_count} content slides, {skipped_count} skipped")
-
-            # Rewriter
-            progress_bar.progress(0.40, text="Running LLM Rewriter...")
-            with contextlib.redirect_stdout(log_output):
-                rewrites = pipeline._run_rewriter(slides, reviews, output_slide_numbers)
-
-            # Math formatter
-            progress_bar.progress(0.60, text="Formatting math expressions...")
-            with contextlib.redirect_stdout(log_output):
-                math_slides = pipeline._run_math_formatter(rewrites, output_slide_numbers)
-
-            # Assemble
-            progress_bar.progress(0.75, text="Assembling document...")
-            document = pipeline.assemble(math_slides)
-
-            # Title editor
-            progress_bar.progress(0.80, text="Editing titles...")
-            with contextlib.redirect_stdout(log_output):
-                document = pipeline._run_title_editor(document)
-
-            # Quality checker
-            progress_bar.progress(0.90, text="Running quality check...")
-            with contextlib.redirect_stdout(log_output):
-                document = pipeline._run_quality_checker(document)
-
-            progress_bar.progress(1.0, text="Done!")
-
-            # Display result
+            st.success("Pipeline complete!")
             st.divider()
-            tab_preview, tab_raw, tab_log = st.tabs(["Preview", "Raw Markdown", "Pipeline Log"])
+
+            tab_preview, tab_raw = st.tabs(["Preview", "Raw Markdown"])
 
             with tab_preview:
                 st.markdown(document)
@@ -129,19 +95,9 @@ if uploaded_file is not None:
             with tab_raw:
                 st.code(document, language="markdown")
 
-            with tab_log:
-                st.code(log_output.getvalue(), language="text")
-
-            # Download button
             st.download_button(
                 label="Download Markdown",
                 data=document,
                 file_name=f"{os.path.splitext(uploaded_file.name)[0]}.md",
                 mime="text/markdown"
             )
-
-        except Exception as error:
-            progress_bar.empty()
-            st.error(f"Pipeline failed: {error}")
-            with st.expander("Pipeline log"):
-                st.code(log_output.getvalue(), language="text")
