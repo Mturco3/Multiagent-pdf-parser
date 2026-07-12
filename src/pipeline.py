@@ -499,9 +499,11 @@ class Pipeline:
         print(f"\nWaiting {WINDOW_SECONDS}s before rewriting step...")
         time.sleep(WINDOW_SECONDS)
 
+        output_slides = [(sn, txt) for sn, txt in slides if sn in output_slide_numbers]
+
         print("\n" + "=" * 60)
         print("LLM Rewriter")
-        print(f"Slides: {len(slides)}")
+        print(f"Slides: {len(output_slides)}")
         print("=" * 60)
 
         rewriter = LLMRewriter()
@@ -516,13 +518,13 @@ class Pipeline:
         rewrites: list[SlideRewrite] = []
         previous_paragraph: str | None = None
         current_section_title: str | None = None
-        total = len(slides)
+        total = len(output_slides)
 
-        for slide_number, text in slides:
+        for slide_number, text in output_slides:
             review = review_by_number[slide_number]
             print(f"[{slide_number}/{total}]", end=" ", flush=True)
 
-            cached_slide = self.load_slide_json("rewrites", slide_number, source_by_number.get(slide_number))
+            cached_slide = self.load_slide_json("rewrites", slide_number, source_by_number[slide_number])
             if cached_slide is not None:
                 print("cached rewrite")
                 rewrites.append(cached_slide)
@@ -536,18 +538,12 @@ class Pipeline:
             if starts_new_section:
                 transition_paragraph = None
 
-            should_call_llm = (
-                review.slide_type not in (SlideType.COURSE_INFO, SlideType.IMAGE_DESCRIPTION, SlideType.INTRODUCTION)
-                and review.reviewer_approved
-                and bool(review.actions)
-            )
-
-            rewrite = rewriter.rewrite_one(text, review, transition_paragraph if should_call_llm else None)
+            rewrite = rewriter.rewrite_one(text, review, transition_paragraph)
 
             if rewrite is None:
                 continue
 
-            self.save_slide_json("rewrites", rewrite, source_by_number.get(slide_number))
+            self.save_slide_json("rewrites", rewrite, source_by_number[slide_number])
             rewrites.append(rewrite)
 
             if rewrite.title and not rewrite.is_continuation:
