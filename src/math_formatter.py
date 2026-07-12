@@ -4,15 +4,12 @@ from pydantic_ai import Agent
 
 from .models import MathReplacementResponse, SlideRewrite
 from .utilities.model_config import (
-    MATH_FALLBACK_MODEL,
-    MATH_FALLBACK_MODEL_RPD,
-    MATH_FALLBACK_MODEL_RPM,
     MATH_MODEL,
     MATH_MODEL_RPD,
     MATH_MODEL_RPM,
     WINDOW_SECONDS,
 )
-from .utilities.model_retry import ModelRequestCandidate, get_cached_agent, run_with_transient_retry_and_fallback
+from .utilities.model_retry import get_cached_agent, run_with_retry
 from .utilities.prompts import MATH_FORMATTER_PROMPT
 from .utilities.rate_limit import RequestPacer
 
@@ -28,29 +25,8 @@ class MathFormatter:
 
     def run_math_request(self, prompt: str) -> MathReplacementResponse:
         """Call the math model with pacing and retries for transient provider failures."""
-        candidates = [
-            ModelRequestCandidate(
-                MATH_MODEL,
-                MATH_MODEL_RPM,
-                MATH_MODEL_RPD,
-                lambda text: get_cached_agent(math_agents, MATH_MODEL, MathReplacementResponse, MATH_FORMATTER_PROMPT).run_sync(text).output,
-            )
-        ]
-        if MATH_FALLBACK_MODEL:
-            candidates.append(
-                ModelRequestCandidate(
-                    MATH_FALLBACK_MODEL,
-                    MATH_FALLBACK_MODEL_RPM,
-                    MATH_FALLBACK_MODEL_RPD,
-                    lambda text: get_cached_agent(
-                        math_agents,
-                        MATH_FALLBACK_MODEL,
-                        MathReplacementResponse,
-                        MATH_FORMATTER_PROMPT,
-                    ).run_sync(text).output,
-                )
-            )
-        return run_with_transient_retry_and_fallback(self.pacer, "math", candidates, prompt, WINDOW_SECONDS)
+        runner = lambda text: get_cached_agent(math_agents, MATH_MODEL, MathReplacementResponse, MATH_FORMATTER_PROMPT).run_sync(text).output
+        return run_with_retry(self.pacer, "math", MATH_MODEL, MATH_MODEL_RPM, MATH_MODEL_RPD, runner, prompt, WINDOW_SECONDS)
 
     def apply_replacement(self, text: str, original_text: str, latex: str) -> tuple[str, bool]:
         """Replace one standalone math fragment outside existing math spans."""
@@ -65,8 +41,16 @@ class MathFormatter:
         return text, False
 
     def is_inside_math_span(self, text: str, position: int) -> bool:
-        """Return whether a character offset is inside a simple markdown math span."""
-        return text[:position].count("$") % 2 == 1
+        """Return whether a character offset is inside a markdown math span."""
+        prefix = text[:position]
+        # Check display math ($$) first by removing matched $$ pairs
+        outside_display = re.sub(r"\$\$[^$]*\$\$", "", prefix)
+        # An unmatched $$ means we are inside a display math block
+        if outside_display.count("$$") % 2 == 1:
+            return True
+        # Remove display math pairs, then check inline math ($)
+        no_display = re.sub(r"\$\$", "", prefix)
+        return no_display.count("$") % 2 == 1
 
     def normalize_latex(self, latex: str, is_display: bool) -> str:
         """Normalize model-produced LaTeX delimiters before inserting it."""
@@ -121,16 +105,3 @@ class MathFormatter:
             rewrite_mode=slide.rewrite_mode,
         )
         return updated_slide, response
-
-    def format_all(self, slides: list[SlideRewrite]) -> tuple[list[SlideRewrite], list[MathReplacementResponse]]:
-        """Process all slides for math formatting while respecting rate limits."""
-        updated_slides: list[SlideRewrite] = []
-        all_responses: list[MathReplacementResponse] = []
-
-        for slide in slides:
-            updated_slide, response = self.format_slide(slide)
-
-            updated_slides.append(updated_slide)
-            all_responses.append(response)
-
-        return updated_slides, all_responses

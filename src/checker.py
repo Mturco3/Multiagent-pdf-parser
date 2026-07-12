@@ -4,21 +4,15 @@ from pydantic_ai import Agent
 
 from .models import ReviewApprovalResponse, SlideReview, SlideReviewResponse, SlideType
 from .utilities.model_config import (
-    CHECKER_FALLBACK_MODEL,
-    CHECKER_FALLBACK_MODEL_RPD,
-    CHECKER_FALLBACK_MODEL_RPM,
     CHECKER_MODEL,
     CHECKER_MODEL_RPD,
     CHECKER_MODEL_RPM,
-    REVIEWER_FALLBACK_MODEL,
-    REVIEWER_FALLBACK_MODEL_RPD,
-    REVIEWER_FALLBACK_MODEL_RPM,
     REVIEWER_MODEL,
     REVIEWER_MODEL_RPD,
     REVIEWER_MODEL_RPM,
     WINDOW_SECONDS,
 )
-from .utilities.model_retry import ModelRequestCandidate, get_cached_agent, run_with_transient_retry_and_fallback
+from .utilities.model_retry import get_cached_agent, run_with_retry
 from .utilities.normalizer import looks_like_raw_slide_block, normalize
 from .utilities.prompts import CHECKER_REVIEWER_PROMPT, CHECKER_SYSTEM_PROMPT
 from .utilities.rate_limit import RequestPacer
@@ -36,66 +30,15 @@ class LLMChecker:
         """Track checker/reviewer model calls using per-model rate buckets."""
         self.pacer = RequestPacer(WINDOW_SECONDS)
 
-    def run_agent_request(self, request_name: str, candidates: list[ModelRequestCandidate], prompt: str):
-        """Run a model request with transient retry and 503 fallback handling."""
-        return run_with_transient_retry_and_fallback(self.pacer, request_name, candidates, prompt, WINDOW_SECONDS)
-
     def run_checker_request(self, prompt: str) -> SlideReviewResponse:
         """Call the checker model while respecting the per-minute request budget."""
-        candidates = [
-            ModelRequestCandidate(
-                CHECKER_MODEL,
-                CHECKER_MODEL_RPM,
-                CHECKER_MODEL_RPD,
-                lambda text: get_cached_agent(checker_agents, CHECKER_MODEL, SlideReviewResponse, CHECKER_SYSTEM_PROMPT).run_sync(text).output,
-            )
-        ]
-        if CHECKER_FALLBACK_MODEL:
-            candidates.append(
-                ModelRequestCandidate(
-                    CHECKER_FALLBACK_MODEL,
-                    CHECKER_FALLBACK_MODEL_RPM,
-                    CHECKER_FALLBACK_MODEL_RPD,
-                    lambda text: get_cached_agent(
-                        checker_agents,
-                        CHECKER_FALLBACK_MODEL,
-                        SlideReviewResponse,
-                        CHECKER_SYSTEM_PROMPT,
-                    ).run_sync(text).output,
-                )
-            )
-        return self.run_agent_request("checker", candidates, prompt)
+        runner = lambda text: get_cached_agent(checker_agents, CHECKER_MODEL, SlideReviewResponse, CHECKER_SYSTEM_PROMPT).run_sync(text).output
+        return run_with_retry(self.pacer, "checker", CHECKER_MODEL, CHECKER_MODEL_RPM, CHECKER_MODEL_RPD, runner, prompt, WINDOW_SECONDS)
 
     def run_reviewer_request(self, prompt: str) -> ReviewApprovalResponse:
         """Call the reviewer model while respecting the per-minute request budget."""
-        candidates = [
-            ModelRequestCandidate(
-                REVIEWER_MODEL,
-                REVIEWER_MODEL_RPM,
-                REVIEWER_MODEL_RPD,
-                lambda text: get_cached_agent(
-                    reviewer_agents,
-                    REVIEWER_MODEL,
-                    ReviewApprovalResponse,
-                    CHECKER_REVIEWER_PROMPT,
-                ).run_sync(text).output,
-            )
-        ]
-        if REVIEWER_FALLBACK_MODEL:
-            candidates.append(
-                ModelRequestCandidate(
-                    REVIEWER_FALLBACK_MODEL,
-                    REVIEWER_FALLBACK_MODEL_RPM,
-                    REVIEWER_FALLBACK_MODEL_RPD,
-                    lambda text: get_cached_agent(
-                        reviewer_agents,
-                        REVIEWER_FALLBACK_MODEL,
-                        ReviewApprovalResponse,
-                        CHECKER_REVIEWER_PROMPT,
-                    ).run_sync(text).output,
-                )
-            )
-        return self.run_agent_request("reviewer", candidates, prompt)
+        runner = lambda text: get_cached_agent(reviewer_agents, REVIEWER_MODEL, ReviewApprovalResponse, CHECKER_REVIEWER_PROMPT).run_sync(text).output
+        return run_with_retry(self.pacer, "reviewer", REVIEWER_MODEL, REVIEWER_MODEL_RPM, REVIEWER_MODEL_RPD, runner, prompt, WINDOW_SECONDS)
 
     def build_checker_prompt(self, normalized_text: str, retry_instruction: str | None = None) -> str:
         """Build the checker prompt, optionally including reviewer feedback from a failed attempt."""
@@ -205,15 +148,3 @@ class LLMChecker:
             reviewer_feedback="Checker did not produce an approved action plan.",
             checker_attempts=MAX_CHECKER_ATTEMPTS,
         )
-
-    def check_all(self, slides: list[tuple[int, str]]) -> list[SlideReview]:
-        """Review all slides while pacing real checker and reviewer model calls."""
-        reviews = []
-        total = len(slides)
-
-        for slide_number, text in slides:
-            print(f"[{slide_number}/{total}]", end=" ", flush=True)
-
-            reviews.append(self.check_one(slide_number, text))
-
-        return reviews

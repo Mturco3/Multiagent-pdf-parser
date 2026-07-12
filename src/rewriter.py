@@ -2,21 +2,15 @@ from pydantic_ai import Agent
 
 from .models import RewriteApprovalResponse, SlideReview, SlideRewrite, SlideType
 from .utilities.model_config import (
-    REVIEWER_FALLBACK_MODEL,
-    REVIEWER_FALLBACK_MODEL_RPD,
-    REVIEWER_FALLBACK_MODEL_RPM,
     REVIEWER_MODEL,
     REVIEWER_MODEL_RPD,
     REVIEWER_MODEL_RPM,
-    REWRITER_FALLBACK_MODEL,
-    REWRITER_FALLBACK_MODEL_RPD,
-    REWRITER_FALLBACK_MODEL_RPM,
     REWRITER_MODEL,
     REWRITER_MODEL_RPD,
     REWRITER_MODEL_RPM,
     WINDOW_SECONDS,
 )
-from .utilities.model_retry import ModelRequestCandidate, get_cached_agent, run_with_transient_retry_and_fallback
+from .utilities.model_retry import get_cached_agent, run_with_retry
 from .utilities.normalizer import normalize
 from .utilities.prompts import REWRITER_SYSTEM_PROMPT, REWRITE_REVIEWER_PROMPT
 from .utilities.rate_limit import RequestPacer
@@ -33,66 +27,15 @@ class LLMRewriter:
         """Initialize the rewriter with rate-limited model access."""
         self.pacer = RequestPacer(WINDOW_SECONDS)
 
-    def run_agent_request(self, request_name: str, candidates: list[ModelRequestCandidate], prompt: str):
-        """Run a model request with transient retry and 503 fallback handling."""
-        return run_with_transient_retry_and_fallback(self.pacer, request_name, candidates, prompt, WINDOW_SECONDS)
-
     def run_rewriter_request(self, prompt: str) -> str:
         """Call the rewrite model with deterministic pacing and transient retries."""
-        candidates = [
-            ModelRequestCandidate(
-                REWRITER_MODEL,
-                REWRITER_MODEL_RPM,
-                REWRITER_MODEL_RPD,
-                lambda text: get_cached_agent(rewriter_agents, REWRITER_MODEL, str, REWRITER_SYSTEM_PROMPT).run_sync(text).output,
-            )
-        ]
-        if REWRITER_FALLBACK_MODEL:
-            candidates.append(
-                ModelRequestCandidate(
-                    REWRITER_FALLBACK_MODEL,
-                    REWRITER_FALLBACK_MODEL_RPM,
-                    REWRITER_FALLBACK_MODEL_RPD,
-                    lambda text: get_cached_agent(
-                        rewriter_agents,
-                        REWRITER_FALLBACK_MODEL,
-                        str,
-                        REWRITER_SYSTEM_PROMPT,
-                    ).run_sync(text).output,
-                )
-            )
-        return self.run_agent_request("rewriter", candidates, prompt)
+        runner = lambda text: get_cached_agent(rewriter_agents, REWRITER_MODEL, str, REWRITER_SYSTEM_PROMPT).run_sync(text).output
+        return run_with_retry(self.pacer, "rewriter", REWRITER_MODEL, REWRITER_MODEL_RPM, REWRITER_MODEL_RPD, runner, prompt, WINDOW_SECONDS)
 
     def run_rewrite_review_request(self, prompt: str) -> RewriteApprovalResponse:
         """Call the rewrite reviewer model with deterministic pacing and transient retries."""
-        candidates = [
-            ModelRequestCandidate(
-                REVIEWER_MODEL,
-                REVIEWER_MODEL_RPM,
-                REVIEWER_MODEL_RPD,
-                lambda text: get_cached_agent(
-                    rewrite_reviewer_agents,
-                    REVIEWER_MODEL,
-                    RewriteApprovalResponse,
-                    REWRITE_REVIEWER_PROMPT,
-                ).run_sync(text).output,
-            )
-        ]
-        if REVIEWER_FALLBACK_MODEL:
-            candidates.append(
-                ModelRequestCandidate(
-                    REVIEWER_FALLBACK_MODEL,
-                    REVIEWER_FALLBACK_MODEL_RPM,
-                    REVIEWER_FALLBACK_MODEL_RPD,
-                    lambda text: get_cached_agent(
-                        rewrite_reviewer_agents,
-                        REVIEWER_FALLBACK_MODEL,
-                        RewriteApprovalResponse,
-                        REWRITE_REVIEWER_PROMPT,
-                    ).run_sync(text).output,
-                )
-            )
-        return self.run_agent_request("rewrite-reviewer", candidates, prompt)
+        runner = lambda text: get_cached_agent(rewrite_reviewer_agents, REVIEWER_MODEL, RewriteApprovalResponse, REWRITE_REVIEWER_PROMPT).run_sync(text).output
+        return run_with_retry(self.pacer, "rewrite-reviewer", REVIEWER_MODEL, REVIEWER_MODEL_RPM, REVIEWER_MODEL_RPD, runner, prompt, WINDOW_SECONDS)
 
     def build_introduction_output(self, review: SlideReview) -> SlideRewrite | None:
         """Return a heading-only output for introduction slides when possible."""
@@ -216,43 +159,3 @@ class LLMRewriter:
         print(f"[slide {review.slide_number:03d}] rewrite not approved; falling back to deterministic passthrough")
         fallback = self.build_passthrough_output(slide_text, review)
         return self.finalize_passthrough_title(slide_text, review, fallback)
-
-    def rewrite_all(self, slides: list[tuple[int, str]], reviews: list[SlideReview]) -> list[SlideRewrite]:
-        """Rewrite all slides that should appear in the final document."""
-        review_by_number = {review.slide_number: review for review in reviews}
-        results: list[SlideRewrite] = []
-        previous_paragraph: str | None = None
-        current_section_title: str | None = None
-        total = len(slides)
-
-        for slide_number, text in slides:
-            review = review_by_number[slide_number]
-            print(f"[{slide_number}/{total}]", end=" ", flush=True)
-
-            transition_paragraph = previous_paragraph
-            starts_new_section = bool(review.title and review.title != current_section_title and not review.is_continuation)
-            if starts_new_section:
-                transition_paragraph = None
-
-            should_call_llm = (
-                review.slide_type not in (SlideType.COURSE_INFO, SlideType.IMAGE_DESCRIPTION, SlideType.INTRODUCTION)
-                and review.reviewer_approved
-                and bool(review.actions)
-            )
-
-            rewrite = self.rewrite_one(text, review, transition_paragraph if should_call_llm else None)
-
-            if rewrite is None:
-                continue
-
-            results.append(rewrite)
-
-            if rewrite.title and not rewrite.is_continuation:
-                current_section_title = rewrite.title
-
-            if rewrite.text:
-                previous_paragraph = rewrite.text
-            else:
-                previous_paragraph = None
-
-        return results

@@ -633,7 +633,7 @@ class Pipeline:
         else:
             print(f"Waiting {WINDOW_SECONDS}s before title editing step...")
             time.sleep(WINDOW_SECONDS)
-            analysis = title_editor.edit(document)
+            analysis = title_editor.identify(document)
             self.save_json("title_analysis", analysis.model_dump(), title_source)
 
         document = title_editor.apply(document, analysis)

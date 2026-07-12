@@ -5,21 +5,15 @@ from pydantic_ai import Agent
 from .models import QualityReport, IssueType
 from .utilities.normalizer import repair_text
 from .utilities.model_config import (
-    QUALITY_FIXER_FALLBACK_MODEL,
-    QUALITY_FIXER_FALLBACK_MODEL_RPD,
-    QUALITY_FIXER_FALLBACK_MODEL_RPM,
     QUALITY_FIXER_MODEL,
     QUALITY_FIXER_MODEL_RPD,
     QUALITY_FIXER_MODEL_RPM,
-    QUALITY_IDENTIFIER_FALLBACK_MODEL,
-    QUALITY_IDENTIFIER_FALLBACK_MODEL_RPD,
-    QUALITY_IDENTIFIER_FALLBACK_MODEL_RPM,
     QUALITY_IDENTIFIER_MODEL,
     QUALITY_IDENTIFIER_MODEL_RPD,
     QUALITY_IDENTIFIER_MODEL_RPM,
     WINDOW_SECONDS,
 )
-from .utilities.model_retry import ModelRequestCandidate, get_cached_agent, run_with_transient_retry_and_fallback
+from .utilities.model_retry import get_cached_agent, run_with_retry
 from .utilities.prompts import QUALITY_CHECKER_PROMPT, QUALITY_FIXER_PROMPT
 from .utilities.rate_limit import RequestPacer
 
@@ -35,66 +29,14 @@ class QualityChecker:
         self.pacer = RequestPacer(WINDOW_SECONDS)
 
     def run_identifier_request(self, prompt: str) -> QualityReport:
-        """Run the quality identifier with transient retry and 503 fallback handling."""
-        candidates = [
-            ModelRequestCandidate(
-                QUALITY_IDENTIFIER_MODEL,
-                QUALITY_IDENTIFIER_MODEL_RPM,
-                QUALITY_IDENTIFIER_MODEL_RPD,
-                lambda text: get_cached_agent(
-                    quality_identifier_agents,
-                    QUALITY_IDENTIFIER_MODEL,
-                    QualityReport,
-                    QUALITY_CHECKER_PROMPT,
-                ).run_sync(text).output,
-            )
-        ]
-        if QUALITY_IDENTIFIER_FALLBACK_MODEL:
-            candidates.append(
-                ModelRequestCandidate(
-                    QUALITY_IDENTIFIER_FALLBACK_MODEL,
-                    QUALITY_IDENTIFIER_FALLBACK_MODEL_RPM,
-                    QUALITY_IDENTIFIER_FALLBACK_MODEL_RPD,
-                    lambda text: get_cached_agent(
-                        quality_identifier_agents,
-                        QUALITY_IDENTIFIER_FALLBACK_MODEL,
-                        QualityReport,
-                        QUALITY_CHECKER_PROMPT,
-                    ).run_sync(text).output,
-                )
-            )
-        return run_with_transient_retry_and_fallback(self.pacer, "quality-identifier", candidates, prompt, WINDOW_SECONDS)
+        """Run the quality identifier with transient retry handling."""
+        runner = lambda text: get_cached_agent(quality_identifier_agents, QUALITY_IDENTIFIER_MODEL, QualityReport, QUALITY_CHECKER_PROMPT).run_sync(text).output
+        return run_with_retry(self.pacer, "quality-identifier", QUALITY_IDENTIFIER_MODEL, QUALITY_IDENTIFIER_MODEL_RPM, QUALITY_IDENTIFIER_MODEL_RPD, runner, prompt, WINDOW_SECONDS)
 
     def run_fixer_request(self, prompt: str) -> str:
-        """Run the quality fixer with transient retry and 503 fallback handling."""
-        candidates = [
-            ModelRequestCandidate(
-                QUALITY_FIXER_MODEL,
-                QUALITY_FIXER_MODEL_RPM,
-                QUALITY_FIXER_MODEL_RPD,
-                lambda text: get_cached_agent(
-                    quality_fixer_agents,
-                    QUALITY_FIXER_MODEL,
-                    str,
-                    QUALITY_FIXER_PROMPT,
-                ).run_sync(text).output,
-            )
-        ]
-        if QUALITY_FIXER_FALLBACK_MODEL:
-            candidates.append(
-                ModelRequestCandidate(
-                    QUALITY_FIXER_FALLBACK_MODEL,
-                    QUALITY_FIXER_FALLBACK_MODEL_RPM,
-                    QUALITY_FIXER_FALLBACK_MODEL_RPD,
-                    lambda text: get_cached_agent(
-                        quality_fixer_agents,
-                        QUALITY_FIXER_FALLBACK_MODEL,
-                        str,
-                        QUALITY_FIXER_PROMPT,
-                    ).run_sync(text).output,
-                )
-            )
-        return run_with_transient_retry_and_fallback(self.pacer, "quality-fixer", candidates, prompt, WINDOW_SECONDS)
+        """Run the quality fixer with transient retry handling."""
+        runner = lambda text: get_cached_agent(quality_fixer_agents, QUALITY_FIXER_MODEL, str, QUALITY_FIXER_PROMPT).run_sync(text).output
+        return run_with_retry(self.pacer, "quality-fixer", QUALITY_FIXER_MODEL, QUALITY_FIXER_MODEL_RPM, QUALITY_FIXER_MODEL_RPD, runner, prompt, WINDOW_SECONDS)
 
     def identify(self, document: str) -> QualityReport:
         """Send the document to the LLM for quality review."""
@@ -123,10 +65,6 @@ class QualityChecker:
 
             start = index + len(target)
 
-    def remove_raw_slide_metadata(self, text: str) -> str:
-        """Remove repeated slide footer/source artifacts that are not lecture-note content."""
-        return text
-
     def remove_validation_artifacts(self, text: str) -> str:
         """Remove leaked provider/retry text that can appear when an LLM returns diagnostics."""
         validation_patterns = [
@@ -141,27 +79,6 @@ class QualityChecker:
         cleaned = text
         for pattern in validation_patterns:
             cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE)
-        return cleaned
-
-    def normalize_question_form(self, text: str) -> str:
-        """Convert common rhetorical slide questions into declarative note fragments."""
-        replacements = {
-            "Can these extreme cases be reached?": "These extreme cases are rarely reached in practice.",
-            "Whether these extreme cases can be reached.": "These extreme cases are rarely reached in practice.",
-        }
-        cleaned = text
-        for question, statement in replacements.items():
-            cleaned = cleaned.replace(question, statement)
-
-        cleaned = re.sub(r"^(#+\s*)Why\s+(.+?)\?\s*$", r"\1Reasons for \2", cleaned, flags=re.MULTILINE)
-        cleaned = re.sub(r"^(#+\s*)What is\s+(.+?)\?\s*$", r"\1Definition of \2", cleaned, flags=re.MULTILINE)
-        cleaned = re.sub(r"^(#+\s*)How\s+(.+?)\?\s*$", r"\1How \2", cleaned, flags=re.MULTILINE)
-        cleaned = re.sub(
-            r"\bCan ([^.?\n]+?) be ([^.?\n]+?)\?",
-            lambda match: f"Whether {match.group(1)} can be {match.group(2)}.",
-            cleaned,
-        )
-        cleaned = re.sub(r"\?(\s|$)", r".\1", cleaned)
         return cleaned
 
     def repair_math_delimiters(self, text: str) -> str:
@@ -191,7 +108,6 @@ class QualityChecker:
         """Collapse a slide-fragment bullet group into a single prose paragraph."""
         cleaned_items: list[str] = []
         for item in bullet_items:
-            item = self.remove_raw_slide_metadata(item)
             item = self.remove_validation_artifacts(item)
             item = re.sub(r"\s+", " ", item).strip()
             if item:
@@ -236,8 +152,6 @@ class QualityChecker:
         """Apply deterministic final cleanup for known slide-transcription artifacts."""
         cleaned = repair_text(document).replace("\r\n", "\n").replace("\r", "\n")
         cleaned = self.remove_validation_artifacts(cleaned)
-        cleaned = self.remove_raw_slide_metadata(cleaned)
-        cleaned = self.normalize_question_form(cleaned)
         cleaned = self.repair_math_delimiters(cleaned)
         cleaned = self.collapse_fragment_bullets(cleaned)
         cleaned = re.sub(r"\n#{6,}\s+", "\n#### ", cleaned)
@@ -257,36 +171,23 @@ class QualityChecker:
             return document
 
         for issue in fixable_issues:
-            # Check that the problematic text exists in the document
             if issue.problematic_text not in document:
                 print(f"[skip] Could not find problematic text for {issue.issue_type.value}")
                 continue
 
-            if issue.issue_type == IssueType.RAW_SLIDE_METADATA:
-                replacement = self.remove_raw_slide_metadata(issue.problematic_text).strip()
-                document = document.replace(issue.problematic_text, replacement, 1)
-                print(f"[fixed] {issue.issue_type.value} (removed metadata)")
-                continue
-
             if issue.issue_type == IssueType.QUESTION_FORM:
-                replacement = self.normalize_question_form(issue.problematic_text).strip()
-                document = document.replace(issue.problematic_text, replacement, 1)
-                print(f"[fixed] {issue.issue_type.value} (declarative form)")
-                continue
-
-            if issue.issue_type == IssueType.BULLET_LIST_SHOULD_BE_COLLAPSED:
+                # Let the LLM fixer handle question-to-statement conversion
+                pass
+            elif issue.issue_type == IssueType.BULLET_LIST_SHOULD_BE_COLLAPSED:
                 replacement = self.collapse_fragment_bullets(issue.problematic_text, force=True).strip()
                 document = document.replace(issue.problematic_text, replacement, 1)
                 print(f"[fixed] {issue.issue_type.value} (collapsed bullets)")
                 continue
-
-            # Handle repetition programmatically by removing the duplicate
-            if issue.issue_type == IssueType.REPETITION:
+            elif issue.issue_type == IssueType.REPETITION:
                 document, fixed = self.replace_first_non_heading_occurrence(document, issue.problematic_text, "")
                 if not fixed:
                     print(f"[skip] Could not find non-heading duplicate for {issue.issue_type.value}")
                     continue
-                # Clean up leftover blank lines from removal
                 while "\n\n\n" in document:
                     document = document.replace("\n\n\n", "\n\n")
                 print(f"[fixed] {issue.issue_type.value} (removed duplicate)")
