@@ -1,8 +1,14 @@
 import csv
 import json
+import math
 import os
 import time
-from datetime import datetime
+import uuid
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+LOCK_STALE_SECONDS = 120
+TOKEN_ESTIMATE_CHARACTERS = 4
 
 
 class DailyQuotaExceededError(RuntimeError):
@@ -10,183 +16,168 @@ class DailyQuotaExceededError(RuntimeError):
 
 
 class RequestPacer:
-    """Track request budgets per model so shared quotas are not overrun."""
+    """Coordinate project-level model quotas safely across threads and processes."""
 
     def __init__(self, window_seconds: int):
-        """Initialize the pacer with a rolling window size for per-minute budgets."""
+        """Initialize persistent quota paths and the rolling window length."""
         self.window_seconds = window_seconds
         project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
         self.usage_path = os.path.join(project_root, "cache", "_model_usage.json")
         self.recent_path = os.path.join(project_root, "cache", "_model_recent_requests.json")
         self.lock_path = os.path.join(project_root, "cache", "_model_rate_limit.lock")
         self.request_log_path = os.path.join(project_root, "request_logs", "model_requests.csv")
-        self.usage_cache: dict[str, dict[str, int]] | None = None
-        self.recent_cache: dict[str, list[float]] | None = None
+        self.input_tpm = self.get_configured_input_tpm()
+
+    def get_configured_input_tpm(self) -> int:
+        """Return the optional project input-token-per-minute limit."""
+        configured_tpm = os.getenv("MODEL_INPUT_TPM", "0").strip()
+        try:
+            return max(int(configured_tpm), 0)
+        except ValueError:
+            return 0
 
     def get_today_key(self) -> str:
-        """Return the local calendar day used for daily request accounting."""
-        return datetime.now().date().isoformat()
-
-    def load_usage(self) -> dict[str, dict[str, int]]:
-        """Load persisted per-day model usage from disk."""
-        if self.usage_cache is not None:
-            return self.usage_cache
-
-        if not os.path.exists(self.usage_path):
-            self.usage_cache = {}
-            return self.usage_cache
-
+        """Return the provider quota date using midnight Pacific time."""
         try:
-            with open(self.usage_path, encoding="utf-8") as file_handle:
+            pacific_timezone = ZoneInfo("America/Los_Angeles")
+        except ZoneInfoNotFoundError:
+            pacific_timezone = timezone(timedelta(hours=-8))
+        return datetime.now(pacific_timezone).date().isoformat()
+
+    def load_json_object(self, filepath: str) -> dict:
+        """Load a JSON object and treat missing or partial state as empty."""
+        if not os.path.exists(filepath):
+            return {}
+        try:
+            with open(filepath, encoding="utf-8") as file_handle:
                 payload = json.load(file_handle)
         except (OSError, json.JSONDecodeError):
-            payload = {}
+            return {}
+        return payload if isinstance(payload, dict) else {}
 
-        if not isinstance(payload, dict):
-            payload = {}
+    def save_json_object(self, filepath: str, payload: dict):
+        """Persist quota state atomically so interrupted writes remain recoverable."""
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+        temp_path = f"{filepath}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+        with open(temp_path, "w", encoding="utf-8") as file_handle:
+            json.dump(payload, file_handle, indent=2, ensure_ascii=False)
+        os.replace(temp_path, filepath)
 
-        self.usage_cache = payload
-        return self.usage_cache
-
-    def save_usage(self):
-        """Persist the current per-day model usage cache to disk."""
-        if self.usage_cache is None:
-            return
-
-        os.makedirs(os.path.dirname(self.usage_path), exist_ok=True)
-        with open(self.usage_path, "w", encoding="utf-8") as file_handle:
-            json.dump(self.usage_cache, file_handle, indent=2, ensure_ascii=False)
-
-    def load_recent(self) -> dict[str, list[float]]:
-        """Load persisted recent per-model request timestamps."""
-        if self.recent_cache is not None:
-            return self.recent_cache
-
-        if not os.path.exists(self.recent_path):
-            self.recent_cache = {}
-            return self.recent_cache
-
+    def remove_stale_lock(self) -> bool:
+        """Remove a lock left behind by a terminated process."""
         try:
-            with open(self.recent_path, encoding="utf-8") as file_handle:
-                payload = json.load(file_handle)
-        except (OSError, json.JSONDecodeError):
-            payload = {}
-
-        if not isinstance(payload, dict):
-            payload = {}
-
-        recent: dict[str, list[float]] = {}
-        for bucket, timestamps in payload.items():
-            if not isinstance(bucket, str) or not isinstance(timestamps, list):
-                continue
-            cleaned: list[float] = []
-            for timestamp in timestamps:
-                try:
-                    cleaned.append(float(timestamp))
-                except (TypeError, ValueError):
-                    continue
-            recent[bucket] = cleaned
-
-        self.recent_cache = recent
-        return self.recent_cache
-
-    def save_recent(self):
-        """Persist recent per-model request timestamps."""
-        if self.recent_cache is None:
-            return
-
-        os.makedirs(os.path.dirname(self.recent_path), exist_ok=True)
-        with open(self.recent_path, "w", encoding="utf-8") as file_handle:
-            json.dump(self.recent_cache, file_handle, indent=2, ensure_ascii=False)
+            lock_age = time.time() - os.path.getmtime(self.lock_path)
+        except FileNotFoundError:
+            return True
+        if lock_age <= LOCK_STALE_SECONDS:
+            return False
+        try:
+            os.remove(self.lock_path)
+        except FileNotFoundError:
+            pass
+        return True
 
     def acquire_lock(self):
-        """Acquire a small cross-process lock for rate-limit state updates."""
+        """Acquire the quota-state lock with recovery for abandoned lock files."""
         os.makedirs(os.path.dirname(self.lock_path), exist_ok=True)
         while True:
             try:
                 file_descriptor = os.open(self.lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                lock_payload = f"pid={os.getpid()} acquired={time.time()}".encode("utf-8")
+                os.write(file_descriptor, lock_payload)
                 os.close(file_descriptor)
                 return
             except FileExistsError:
+                self.remove_stale_lock()
                 time.sleep(0.05)
 
     def release_lock(self):
-        """Release the cross-process rate-limit lock."""
-        if os.path.exists(self.lock_path):
+        """Release the quota-state lock after a state transaction."""
+        try:
             os.remove(self.lock_path)
+        except FileNotFoundError:
+            pass
 
-    def get_daily_count(self, bucket: str) -> int:
-        """Return the persisted request count for the current day and model."""
-        usage = self.load_usage()
-        return int(usage.get(self.get_today_key(), {}).get(bucket, 0))
+    def normalize_recent_entries(self, payload: dict) -> dict[str, list[dict[str, float | int]]]:
+        """Normalize current and legacy recent-request records."""
+        recent: dict[str, list[dict[str, float | int]]] = {}
+        for bucket, entries in payload.items():
+            if not isinstance(bucket, str) or not isinstance(entries, list):
+                continue
+            normalized_entries: list[dict[str, float | int]] = []
+            for entry in entries:
+                if isinstance(entry, (int, float)):
+                    normalized_entries.append({"timestamp": float(entry), "input_tokens": 0})
+                    continue
+                if not isinstance(entry, dict):
+                    continue
+                try:
+                    timestamp = float(entry.get("timestamp", 0.0))
+                    input_tokens = max(int(entry.get("input_tokens", 0)), 0)
+                except (TypeError, ValueError):
+                    continue
+                normalized_entries.append({"timestamp": timestamp, "input_tokens": input_tokens})
+            recent[bucket] = normalized_entries
+        return recent
 
-    def ensure_daily_capacity(self, bucket: str, rpd: int):
-        """Raise before sending a request if the configured daily budget is exhausted."""
-        current_count = self.get_daily_count(bucket)
-        if current_count >= rpd:
-            raise DailyQuotaExceededError(
-                f"Local daily request budget reached for {bucket}: {current_count}/{rpd}. "
-                "Resume after the quota window resets or switch this stage to a different model."
-            )
-
-    def prune_recent(self, bucket: str, now: float):
-        """Keep only timestamps that still belong to the rolling minute window."""
-        recent = self.load_recent()
-        timestamps = recent.get(bucket, [])
-        cutoff = now - self.window_seconds
-        recent[bucket] = [timestamp for timestamp in timestamps if timestamp > cutoff]
-
-    def increment_daily_usage(self, bucket: str):
-        """Record one dispatched request in the current day."""
-        usage = self.load_usage()
-        today_key = self.get_today_key()
-        day_usage = usage.setdefault(today_key, {})
-        day_usage[bucket] = int(day_usage.get(bucket, 0)) + 1
-        self.save_usage()
+    def estimate_input_tokens(self, prompt: str | None) -> int:
+        """Estimate input tokens conservatively when provider counts are unavailable."""
+        if not prompt:
+            return 0
+        return math.ceil(len(prompt) / TOKEN_ESTIMATE_CHARACTERS)
 
     def append_request_log(self, bucket: str, request_name: str, requested_at: datetime):
-        """Append one human-readable request reservation row to the CSV log."""
+        """Append one human-readable request reservation to the CSV log."""
         os.makedirs(os.path.dirname(self.request_log_path), exist_ok=True)
         write_header = not os.path.exists(self.request_log_path) or os.path.getsize(self.request_log_path) == 0
         with open(self.request_log_path, "a", encoding="utf-8", newline="") as file_handle:
-            writer = csv.DictWriter(file_handle, fieldnames=["model", "request_made", "requested_at"])
+            fieldnames = ["model", "request_made", "requested_at"]
+            writer = csv.DictWriter(file_handle, fieldnames=fieldnames)
             if write_header:
                 writer.writeheader()
-            writer.writerow(
-                {
-                    "model": bucket,
-                    "request_made": request_name,
-                    "requested_at": requested_at.isoformat(timespec="seconds"),
-                }
-            )
+            writer.writerow({"model": bucket, "request_made": request_name, "requested_at": requested_at.isoformat(timespec="seconds")})
 
-    def acquire_request_slot(self, bucket: str, rpm: int, rpd: int, request_name: str | None = None):
-        """Reserve one request slot before dispatch using a rolling 60-second window."""
+    def acquire_request_slot(self, bucket: str, rpm: int, rpd: int, request_name: str | None = None, prompt: str | None = None):
+        """Reserve a project-level request slot under RPM, optional TPM, and RPD limits."""
         if rpm < 1 or rpd < 1:
-            raise DailyQuotaExceededError(
-                f"Configured request budget is zero for {bucket}: rpm={rpm}, rpd={rpd}. "
-                "Switch this stage to an available model or override its limits."
-            )
+            raise DailyQuotaExceededError(f"Configured request budget is zero for {bucket}: rpm={rpm}, rpd={rpd}. Switch models or override its limits.")
 
+        input_tokens = self.estimate_input_tokens(prompt)
+        if self.input_tpm > 0 and input_tokens > self.input_tpm:
+            raise DailyQuotaExceededError(f"Estimated prompt size exceeds MODEL_INPUT_TPM for {bucket}: {input_tokens}/{self.input_tpm}.")
         while True:
             wait_seconds = 0.0
             self.acquire_lock()
             try:
                 now = time.time()
-                self.ensure_daily_capacity(bucket, rpd)
-                self.prune_recent(bucket, now)
+                today_key = self.get_today_key()
+                usage = self.load_json_object(self.usage_path)
+                day_usage = usage.get(today_key, {})
+                current_daily_count = int(day_usage.get(bucket, 0))
+                if current_daily_count >= rpd:
+                    raise DailyQuotaExceededError(f"Local daily request budget reached for {bucket}: {current_daily_count}/{rpd}. Resume after the Pacific-time quota reset or switch models.")
 
-                recent = self.load_recent()
-                timestamps = recent.setdefault(bucket, [])
-                if len(timestamps) < rpm:
-                    timestamps.append(now)
-                    self.save_recent()
-                    self.increment_daily_usage(bucket)
+                recent_payload = self.load_json_object(self.recent_path)
+                recent = self.normalize_recent_entries(recent_payload)
+                cutoff = now - self.window_seconds
+                entries = [entry for entry in recent.get(bucket, []) if float(entry["timestamp"]) > cutoff]
+                recent[bucket] = entries
+                used_input_tokens = sum(int(entry["input_tokens"]) for entry in entries)
+                rpm_available = len(entries) < rpm
+                tpm_available = self.input_tpm < 1 or used_input_tokens + input_tokens <= self.input_tpm
+
+                if rpm_available and tpm_available:
+                    entries.append({"timestamp": now, "input_tokens": input_tokens})
+                    usage = {today_key: day_usage}
+                    day_usage[bucket] = current_daily_count + 1
+                    self.save_json_object(self.recent_path, recent)
+                    self.save_json_object(self.usage_path, usage)
                     self.append_request_log(bucket, request_name or "unspecified", datetime.now())
                     return
 
-                oldest_timestamp = min(timestamps)
-                wait_seconds = max((oldest_timestamp + self.window_seconds) - now, 0.05)
+                oldest_timestamp = min(float(entry["timestamp"]) for entry in entries)
+                wait_seconds = max(oldest_timestamp + self.window_seconds - now, 0.05)
+                self.save_json_object(self.recent_path, recent)
             finally:
                 self.release_lock()
 
@@ -194,25 +185,26 @@ class RequestPacer:
             time.sleep(wait_seconds)
 
     def mark_daily_exhausted(self, bucket: str, rpd: int):
-        """Persist that the model should be treated as exhausted for the rest of the day."""
+        """Persist a provider-reported daily exhaustion under the state lock."""
         if rpd < 1:
             return
-
-        usage = self.load_usage()
-        today_key = self.get_today_key()
-        day_usage = usage.setdefault(today_key, {})
-        day_usage[bucket] = max(int(day_usage.get(bucket, 0)), rpd)
-        self.save_usage()
+        self.acquire_lock()
+        try:
+            today_key = self.get_today_key()
+            usage = self.load_json_object(self.usage_path)
+            day_usage = usage.get(today_key, {})
+            day_usage[bucket] = max(int(day_usage.get(bucket, 0)), rpd)
+            self.save_json_object(self.usage_path, {today_key: day_usage})
+        finally:
+            self.release_lock()
 
     def is_daily_quota_error(self, error_body) -> bool:
-        """Detect provider responses that indicate a daily request-budget exhaustion."""
+        """Detect provider responses that indicate daily request exhaustion."""
         if not isinstance(error_body, dict):
             return False
-
         error_payload = error_body.get("error")
         if not isinstance(error_payload, dict):
             return False
-
         details = error_payload.get("details")
         if isinstance(details, list):
             for detail in details:
@@ -222,11 +214,7 @@ class RequestPacer:
                 if not isinstance(violations, list):
                     continue
                 for violation in violations:
-                    if not isinstance(violation, dict):
-                        continue
-                    quota_id = str(violation.get("quotaId", ""))
-                    if "PerDay" in quota_id:
+                    if isinstance(violation, dict) and "PerDay" in str(violation.get("quotaId", "")):
                         return True
-
         message = str(error_payload.get("message", ""))
         return "perday" in message.lower() or "per day" in message.lower()

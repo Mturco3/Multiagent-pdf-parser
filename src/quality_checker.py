@@ -4,18 +4,10 @@ from pydantic_ai import Agent
 
 from .models import QualityReport, IssueType
 from .utilities.normalizer import repair_text
-from .utilities.model_config import (
-    QUALITY_FIXER_MODEL,
-    QUALITY_FIXER_MODEL_RPD,
-    QUALITY_FIXER_MODEL_RPM,
-    QUALITY_IDENTIFIER_MODEL,
-    QUALITY_IDENTIFIER_MODEL_RPD,
-    QUALITY_IDENTIFIER_MODEL_RPM,
-    WINDOW_SECONDS,
-)
+from .utilities.model_config import QUALITY_FIXER_MODEL, QUALITY_FIXER_MODEL_RPD, QUALITY_FIXER_MODEL_RPM, QUALITY_IDENTIFIER_MODEL, QUALITY_IDENTIFIER_MODEL_RPD, QUALITY_IDENTIFIER_MODEL_RPM, WINDOW_SECONDS
 from .utilities.model_retry import get_cached_agent, run_with_retry
 from .utilities.prompts import QUALITY_CHECKER_PROMPT, QUALITY_FIXER_PROMPT
-from .utilities.rate_limit import RequestPacer
+from .utilities.rate_limit import DailyQuotaExceededError, RequestPacer
 
 quality_identifier_agents: dict[str, Agent] = {}
 quality_fixer_agents: dict[str, Agent] = {}
@@ -30,18 +22,19 @@ class QualityChecker:
 
     def run_identifier_request(self, prompt: str) -> QualityReport:
         """Run the quality identifier with transient retry handling."""
-        runner = lambda text: get_cached_agent(quality_identifier_agents, QUALITY_IDENTIFIER_MODEL, QualityReport, QUALITY_CHECKER_PROMPT).run_sync(text).output
+        runner = lambda active_model, text: get_cached_agent(quality_identifier_agents, active_model, QualityReport, QUALITY_CHECKER_PROMPT).run_sync(text).output
         return run_with_retry(self.pacer, "quality-identifier", QUALITY_IDENTIFIER_MODEL, QUALITY_IDENTIFIER_MODEL_RPM, QUALITY_IDENTIFIER_MODEL_RPD, runner, prompt, WINDOW_SECONDS)
 
     def run_fixer_request(self, prompt: str) -> str:
         """Run the quality fixer with transient retry handling."""
-        runner = lambda text: get_cached_agent(quality_fixer_agents, QUALITY_FIXER_MODEL, str, QUALITY_FIXER_PROMPT).run_sync(text).output
+        runner = lambda active_model, text: get_cached_agent(quality_fixer_agents, active_model, str, QUALITY_FIXER_PROMPT).run_sync(text).output
         return run_with_retry(self.pacer, "quality-fixer", QUALITY_FIXER_MODEL, QUALITY_FIXER_MODEL_RPM, QUALITY_FIXER_MODEL_RPD, runner, prompt, WINDOW_SECONDS)
 
-    def identify(self, document: str) -> QualityReport:
-        """Send the document to the LLM for quality review."""
+    def identify(self, source_document: str, document: str) -> QualityReport:
+        """Compare generated notes with their source slides during quality review."""
         print("Identifying quality issues...")
-        report = self.run_identifier_request(f"Document:\n\n{document}")
+        prompt = f"Source slides:\n\n{source_document}\n\nGenerated document:\n\n{document}"
+        report = self.run_identifier_request(prompt)
         if report.issues:
             for issue in report.issues:
                 print(f"[{issue.issue_type.value}] {issue.explanation}")
@@ -49,11 +42,11 @@ class QualityChecker:
             print("No issues found.")
         return report
 
-    def replace_first_non_heading_occurrence(self, document: str, target: str, replacement: str) -> tuple[str, bool]:
-        """Replace the first target occurrence that is not part of a markdown heading."""
-        start = 0
+    def replace_last_non_heading_occurrence(self, document: str, target: str, replacement: str) -> tuple[str, bool]:
+        """Replace the last target occurrence that is not part of a Markdown heading."""
+        end = len(document)
         while True:
-            index = document.find(target, start)
+            index = document.rfind(target, 0, end)
             if index < 0:
                 return document, False
 
@@ -63,7 +56,7 @@ class QualityChecker:
                 updated = document[:index] + replacement + document[index + len(target):]
                 return updated, True
 
-            start = index + len(target)
+            end = index
 
     def remove_validation_artifacts(self, text: str) -> str:
         """Remove leaked provider/retry text that can appear when an LLM returns diagnostics."""
@@ -73,7 +66,7 @@ class QualityChecker:
             r"(?im)^[ \t]*Fix the errors and try again\.[ \t]*\n?",
             r"\bValidation feedback:\b",
             r"\bPlease return text\.\b",
-            r"\bFix the errors and try again\.\b",
+            r"\bFix the errors and try again\.\b"
         ]
 
         cleaned = text
@@ -93,17 +86,6 @@ class QualityChecker:
         """Return the text of a markdown bullet line without its marker."""
         return re.sub(r"^\s*[-*]\s+", "", line).strip()
 
-    def looks_like_true_enumeration(self, bullet_items: list[str], previous_heading: str | None) -> bool:
-        """Heuristically preserve lists that are genuine enumerations rather than slide fragments."""
-        if not bullet_items:
-            return False
-
-        heading = (previous_heading or "").lower()
-        named_items = sum(1 for item in bullet_items if re.match(r"^[A-Z][A-Za-z0-9 /-]{1,45}:\s+\S+", item))
-        explicitly_structural_heading = any(cue in heading for cue in ("types", "categories", "options", "criteria"))
-
-        return explicitly_structural_heading and named_items >= 2
-
     def collapse_bullet_group(self, bullet_items: list[str]) -> str:
         """Collapse a slide-fragment bullet group into a single prose paragraph."""
         cleaned_items: list[str] = []
@@ -115,35 +97,28 @@ class QualityChecker:
 
         return " ".join(cleaned_items).strip()
 
-    def collapse_fragment_bullets(self, document: str, force: bool = False) -> str:
-        """Collapse residual markdown bullet groups that are slide fragments."""
+    def collapse_fragment_bullets(self, document: str) -> str:
+        """Collapse one model-identified fragment list into a prose paragraph."""
         lines = document.splitlines()
         output: list[str] = []
         bullet_buffer: list[str] = []
-        previous_heading: str | None = None
 
         def flush_bullets():
+            """Append the buffered bullet group as a single paragraph."""
             if not bullet_buffer:
                 return
-
-            if not force and self.looks_like_true_enumeration(bullet_buffer, previous_heading):
-                output.extend(f"- {item}" for item in bullet_buffer)
-            else:
-                paragraph = self.collapse_bullet_group(bullet_buffer)
-                if paragraph:
-                    output.append(paragraph)
+            paragraph = self.collapse_bullet_group(bullet_buffer)
+            if paragraph:
+                output.append(paragraph)
             bullet_buffer.clear()
 
         for line in lines:
-            stripped = line.strip()
             if re.match(r"^\s*[-*]\s+\S+", line):
                 bullet_buffer.append(self.bullet_item_text(line))
                 continue
 
             flush_bullets()
             output.append(line.rstrip())
-            if stripped.startswith("#"):
-                previous_heading = stripped
 
         flush_bullets()
         return "\n".join(output)
@@ -153,7 +128,6 @@ class QualityChecker:
         cleaned = repair_text(document).replace("\r\n", "\n").replace("\r", "\n")
         cleaned = self.remove_validation_artifacts(cleaned)
         cleaned = self.repair_math_delimiters(cleaned)
-        cleaned = self.collapse_fragment_bullets(cleaned)
         cleaned = re.sub(r"\n#{6,}\s+", "\n#### ", cleaned)
         cleaned = re.sub(r"^#{1,6}\s*$\n?", "", cleaned, flags=re.MULTILINE)
         cleaned = re.sub(r"^(#+\s+)#+\s+", r"\1", cleaned, flags=re.MULTILINE)
@@ -161,9 +135,8 @@ class QualityChecker:
         cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
         return cleaned.strip() + "\n"
 
-    def fix(self, document: str, report: QualityReport) -> str:
-        """Fix each identified issue by sending the problematic fragment to the LLM."""
-        # Filter out content_lost issues since they cannot be fixed without originals
+    def fix(self, source_document: str, document: str, report: QualityReport) -> str:
+        """Fix each identified issue with access to the original included slides."""
         fixable_issues = [i for i in report.issues if i.issue_type != IssueType.CONTENT_LOST]
 
         if not fixable_issues:
@@ -175,16 +148,16 @@ class QualityChecker:
                 print(f"[skip] Could not find problematic text for {issue.issue_type.value}")
                 continue
 
-            if issue.issue_type == IssueType.QUESTION_FORM:
-                # Let the LLM fixer handle question-to-statement conversion
-                pass
-            elif issue.issue_type == IssueType.BULLET_LIST_SHOULD_BE_COLLAPSED:
-                replacement = self.collapse_fragment_bullets(issue.problematic_text, force=True).strip()
+            if issue.issue_type == IssueType.BULLET_LIST_SHOULD_BE_COLLAPSED:
+                replacement = self.collapse_fragment_bullets(issue.problematic_text).strip()
                 document = document.replace(issue.problematic_text, replacement, 1)
                 print(f"[fixed] {issue.issue_type.value} (collapsed bullets)")
                 continue
             elif issue.issue_type == IssueType.REPETITION:
-                document, fixed = self.replace_first_non_heading_occurrence(document, issue.problematic_text, "")
+                if document.count(issue.problematic_text) < 2:
+                    print(f"[skip] Repetition target does not occur twice")
+                    continue
+                document, fixed = self.replace_last_non_heading_occurrence(document, issue.problematic_text, "")
                 if not fixed:
                     print(f"[skip] Could not find non-heading duplicate for {issue.issue_type.value}")
                     continue
@@ -194,16 +167,18 @@ class QualityChecker:
                 continue
 
             print(f"[fixing] {issue.issue_type.value}...")
-            prompt = f"Issue type: {issue.issue_type.value}\nExplanation: {issue.explanation}\n\nText to fix:\n{issue.problematic_text}"
+            prompt = f"Issue type: {issue.issue_type.value}\nExplanation: {issue.explanation}\n\nSource slides for reference:\n{source_document}\n\nText to fix:\n{issue.problematic_text}"
             try:
                 replacement = self.run_fixer_request(prompt)
                 document = document.replace(issue.problematic_text, replacement, 1)
                 print(f"[fixed] {issue.issue_type.value}")
+            except DailyQuotaExceededError:
+                raise
             except Exception as error:
-                print(f"[error] Failed to fix {issue.issue_type.value}: {error}")
+                raise RuntimeError(f"Failed to fix {issue.issue_type.value}: {error}") from error
 
         return self.sanitize_document(document)
 
-    def check(self, document: str) -> QualityReport:
+    def check(self, source_document: str, document: str) -> QualityReport:
         """Run identification step. Returns the report for caching."""
-        return self.identify(document)
+        return self.identify(source_document, document)

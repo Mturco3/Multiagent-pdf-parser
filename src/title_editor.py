@@ -3,12 +3,7 @@ import re
 from pydantic_ai import Agent
 
 from .models import TitleAnalysis, HeadingAction
-from .utilities.model_config import (
-    TITLE_MODEL,
-    TITLE_MODEL_RPD,
-    TITLE_MODEL_RPM,
-    WINDOW_SECONDS,
-)
+from .utilities.model_config import TITLE_MODEL, TITLE_MODEL_RPD, TITLE_MODEL_RPM, WINDOW_SECONDS
 from .utilities.model_retry import get_cached_agent, run_with_retry
 from .utilities.prompts import TITLE_IDENTIFIER_PROMPT
 from .utilities.rate_limit import RequestPacer
@@ -26,27 +21,43 @@ class TitleEditor:
     def identify(self, document: str) -> TitleAnalysis:
         """Send the document to the LLM to identify all heading changes."""
         print("Identifying heading changes...")
-        runner = lambda text: get_cached_agent(title_identifier_agents, TITLE_MODEL, TitleAnalysis, TITLE_IDENTIFIER_PROMPT).run_sync(text).output
-        analysis = run_with_retry(self.pacer, "title", TITLE_MODEL, TITLE_MODEL_RPM, TITLE_MODEL_RPD, runner, f"Document:\n\n{document}", WINDOW_SECONDS)
+        headings = [line for line in document.splitlines() if re.match(r"^#{1,6}\s+\S", line)]
+        heading_inventory = "\n".join(f"[heading {index}] {heading}" for index, heading in enumerate(headings, start=1))
+        prompt = f"Heading inventory:\n{heading_inventory}\n\nDocument:\n\n{document}"
+        runner = lambda active_model, text: get_cached_agent(title_identifier_agents, active_model, TitleAnalysis, TITLE_IDENTIFIER_PROMPT).run_sync(text).output
+        analysis = run_with_retry(self.pacer, "title", TITLE_MODEL, TITLE_MODEL_RPM, TITLE_MODEL_RPD, runner, prompt, WINDOW_SECONDS)
         print(f"Found {len(analysis.changes)} heading change(s).")
         return analysis
 
     def apply(self, document: str, analysis: TitleAnalysis) -> str:
-        """Apply heading changes programmatically without LLM."""
-        for change in analysis.changes:
+        """Apply heading changes by stable heading index without touching body text."""
+        changes_by_index = {change.heading_index: change for change in analysis.changes}
+        output_lines: list[str] = []
+        heading_index = 0
+
+        for line in document.splitlines():
+            if not re.match(r"^#{1,6}\s+\S", line):
+                output_lines.append(line)
+                continue
+
+            heading_index += 1
+            change = changes_by_index.get(heading_index)
+            if change is None or change.original_heading != line:
+                output_lines.append(line)
+                continue
             if change.action == HeadingAction.REMOVE:
-                # Remove the heading line and any trailing blank line
-                pattern = re.escape(change.original_heading) + r"\n{1,2}"
-                document = re.sub(pattern, "", document, count=1)
-                print(f"[removed] {change.original_heading}")
-            elif change.action == HeadingAction.KEEP and change.new_level is not None:
-                heading_text = change.new_text
-                if heading_text is None:
-                    heading_text = re.sub(r"^#+\s*", "", change.original_heading)
-                else:
-                    heading_text = re.sub(r"^#+\s*", "", heading_text)
-                new_heading = "#" * change.new_level + " " + heading_text
-                if new_heading != change.original_heading:
-                    document = document.replace(change.original_heading, new_heading, 1)
-                    print(f"[changed] {change.original_heading} -> {new_heading}")
-        return document
+                print(f"[removed] {line}")
+                continue
+
+            original_level = len(line) - len(line.lstrip("#"))
+            new_level = change.new_level or original_level
+            heading_text = change.new_text or re.sub(r"^#+\s*", "", line)
+            heading_text = re.sub(r"^#+\s*", "", heading_text).strip()
+            new_heading = "#" * new_level + " " + heading_text
+            output_lines.append(new_heading)
+            if new_heading != line:
+                print(f"[changed] {line} -> {new_heading}")
+
+        updated_document = "\n".join(output_lines)
+        updated_document = re.sub(r"\n{3,}", "\n\n", updated_document)
+        return updated_document.strip() + "\n"

@@ -1,150 +1,77 @@
-import json
-
 from pydantic_ai import Agent
 
-from .models import ReviewApprovalResponse, SlideReview, SlideReviewResponse, SlideType
-from .utilities.model_config import (
-    CHECKER_MODEL,
-    CHECKER_MODEL_RPD,
-    CHECKER_MODEL_RPM,
-    REVIEWER_MODEL,
-    REVIEWER_MODEL_RPD,
-    REVIEWER_MODEL_RPM,
-    WINDOW_SECONDS,
-)
+from .models import SlideReview, SlideReviewResponse, SlideType
+from .utilities.model_config import CHECKER_MODEL, CHECKER_MODEL_RPD, CHECKER_MODEL_RPM, WINDOW_SECONDS
 from .utilities.model_retry import get_cached_agent, run_with_retry
 from .utilities.normalizer import looks_like_raw_slide_block, normalize
-from .utilities.prompts import CHECKER_REVIEWER_PROMPT, CHECKER_SYSTEM_PROMPT
+from .utilities.prompts import CHECKER_SYSTEM_PROMPT
 from .utilities.rate_limit import RequestPacer
 
-MAX_CHECKER_ATTEMPTS = 3
-
 checker_agents: dict[str, Agent] = {}
-reviewer_agents: dict[str, Agent] = {}
 
 
 class LLMChecker:
-    """Sends each slide's text to the LLM and collects structured reviews."""
+    """Classify slides and return deterministically validated edit actions."""
 
     def __init__(self):
-        """Track checker/reviewer model calls using per-model rate buckets."""
+        """Initialize model pacing for checker requests."""
         self.pacer = RequestPacer(WINDOW_SECONDS)
 
     def run_checker_request(self, prompt: str) -> SlideReviewResponse:
-        """Call the checker model while respecting the per-minute request budget."""
-        runner = lambda text: get_cached_agent(checker_agents, CHECKER_MODEL, SlideReviewResponse, CHECKER_SYSTEM_PROMPT).run_sync(text).output
+        """Call the checker model with shared rate limiting and retries."""
+        runner = lambda active_model, text: get_cached_agent(checker_agents, active_model, SlideReviewResponse, CHECKER_SYSTEM_PROMPT).run_sync(text).output
         return run_with_retry(self.pacer, "checker", CHECKER_MODEL, CHECKER_MODEL_RPM, CHECKER_MODEL_RPD, runner, prompt, WINDOW_SECONDS)
 
-    def run_reviewer_request(self, prompt: str) -> ReviewApprovalResponse:
-        """Call the reviewer model while respecting the per-minute request budget."""
-        runner = lambda text: get_cached_agent(reviewer_agents, REVIEWER_MODEL, ReviewApprovalResponse, CHECKER_REVIEWER_PROMPT).run_sync(text).output
-        return run_with_retry(self.pacer, "reviewer", REVIEWER_MODEL, REVIEWER_MODEL_RPM, REVIEWER_MODEL_RPD, runner, prompt, WINDOW_SECONDS)
+    def build_checker_prompt(self, raw_text: str, normalized_text: str) -> str:
+        """Build a compact checker prompt with deterministic structural hints."""
+        raw_block_hint = "yes" if looks_like_raw_slide_block(raw_text) else "no"
+        return f"Slide text:\n\n{normalized_text}\n\nStructural hints:\n- raw_slide_block_detected: {raw_block_hint}"
 
-    def build_checker_prompt(self, normalized_text: str, retry_instruction: str | None = None) -> str:
-        """Build the checker prompt, optionally including reviewer feedback from a failed attempt."""
-        raw_block_hint = "yes" if looks_like_raw_slide_block(normalized_text) else "no"
-        prompt = f"Slide text:\n\n{normalized_text}\n\nStructural hints:\n- raw_slide_block_detected: {raw_block_hint}"
-        if retry_instruction:
-            prompt += (
-                "\n\nReviewer feedback from the previous attempt:\n"
-                f"{retry_instruction}\n\n"
-                "Return a corrected structured review. Keep every original_fragment as an exact excerpt from the slide text. "
-                "Use only these action types when needed: insert_connectivity, remove_personal_pronouns, flatten_bullets, define_acronym, incomplete_sentence."
-            )
-        return prompt
+    def validate_title(self, normalized_text: str, proposed_title: str | None) -> str | None:
+        """Accept an exact title or fall back to the isolated first text block."""
+        if proposed_title and proposed_title in normalized_text:
+            return proposed_title
+        first_block = normalized_text.split("\n", 1)[0].strip()
+        if first_block and len(first_block) <= 160:
+            return first_block
+        return None
 
     def canonicalize_review(self, normalized_text: str, review: SlideReview) -> SlideReview:
-        """Deduplicate and sort actions so later application stays stable across runs."""
-        unique_actions = []
+        """Remove unsupported actions and order valid unique actions by source position."""
+        valid_actions = []
         seen_actions: set[tuple[str, str]] = set()
 
         for action in review.actions:
-            key = (action.action.value, action.original_fragment)
-            if key in seen_actions:
+            if action.original_fragment not in normalized_text:
+                print(f"[slide {review.slide_number:03d}] dropped action with a non-source fragment")
                 continue
-            seen_actions.add(key)
-            unique_actions.append(action)
+            action_key = action.action.value, action.original_fragment
+            if action_key in seen_actions:
+                continue
+            seen_actions.add(action_key)
+            valid_actions.append(action)
 
         def action_sort_key(action) -> tuple[int, str, str]:
+            """Sort actions by source position and stable action metadata."""
             position = normalized_text.find(action.original_fragment)
-            if position < 0:
-                position = len(normalized_text)
-            return (position, action.action.value, action.original_fragment)
+            return position, action.action.value, action.original_fragment
 
-        ordered_actions = sorted(unique_actions, key=action_sort_key)
-        return review.model_copy(update={"actions": ordered_actions})
-
-    def review_proposal(self, normalized_text: str, review: SlideReview) -> ReviewApprovalResponse:
-        """Ask the reviewer agent to accept or reject the proposed review."""
-        proposal = {
-            "slide_type": review.slide_type.value,
-            "title": review.title,
-            "is_continuation": review.is_continuation,
-            "key_concepts": review.key_concepts,
-            "summary": review.summary,
-            "actions": [action.model_dump(mode="json") for action in review.actions],
-        }
-        prompt = (
-            f"Slide text:\n\n{normalized_text}\n\n"
-            "Proposed review JSON:\n"
-            f"{json.dumps(proposal, indent=2, ensure_ascii=False)}"
-        )
-        return self.run_reviewer_request(prompt)
+        ordered_actions = sorted(valid_actions, key=action_sort_key)
+        validated_title = self.validate_title(normalized_text, review.title)
+        return review.model_copy(update={"title": validated_title, "actions": ordered_actions})
 
     def check_one(self, slide_number: int, raw_text: str) -> SlideReview:
-        """Review a single slide's text through the checker agent."""
+        """Classify and validate one slide without a redundant reviewer call."""
         normalized_text = normalize(raw_text)
-
         if len(normalized_text.strip()) < 10:
             print(f"[slide {slide_number:03d}] skipped (empty)")
-            return SlideReview(
-                slide_number=slide_number,
-                slide_type=SlideType.INTRODUCTION,
-                title=None,
-                is_continuation=False,
-                key_concepts=[],
-                summary=None,
-                actions=[],
-            )
+            return SlideReview(slide_number=slide_number, slide_type=SlideType.INTRODUCTION, title=None, is_continuation=False, actions=[])
 
-        retry_instruction: str | None = None
-        last_review: SlideReview | None = None
-
-        for attempt in range(1, MAX_CHECKER_ATTEMPTS + 1):
-            print(f"[slide {slide_number:03d}] checker attempt {attempt}/{MAX_CHECKER_ATTEMPTS}...")
-            checker_output = self.run_checker_request(self.build_checker_prompt(normalized_text, retry_instruction))
-            review = SlideReview(slide_number=slide_number, checker_attempts=attempt, **checker_output.model_dump())
-            review = self.canonicalize_review(normalized_text, review)
-
-            approval = self.review_proposal(normalized_text, review)
-            review = review.model_copy(
-                update={
-                    "reviewer_approved": approval.approved,
-                    "reviewer_feedback": approval.reason,
-                    "checker_attempts": attempt,
-                }
-            )
-            last_review = review
-
-            if approval.approved:
-                title_display = f'"{review.title}"' if review.title else "no title"
-                actions_display = f"{len(review.actions)} action(s)" if review.actions else "no actions"
-                print(f"[slide {slide_number:03d}] approved - {review.slide_type.value}, {title_display}, {actions_display}")
-                return review
-
-            retry_instruction = approval.retry_instruction or approval.reason or "Tighten the review and remove unsupported actions."
-            print(f"[slide {slide_number:03d}] rejected - {retry_instruction}")
-
-        print(f"[slide {slide_number:03d}] review not approved after {MAX_CHECKER_ATTEMPTS} attempts; preserving original text later")
-        return last_review if last_review is not None else SlideReview(
-            slide_number=slide_number,
-            slide_type=SlideType.CONTENT,
-            title=None,
-            is_continuation=False,
-            key_concepts=[],
-            summary=None,
-            actions=[],
-            reviewer_approved=False,
-            reviewer_feedback="Checker did not produce an approved action plan.",
-            checker_attempts=MAX_CHECKER_ATTEMPTS,
-        )
+        print(f"[slide {slide_number:03d}] checking...")
+        checker_output = self.run_checker_request(self.build_checker_prompt(raw_text, normalized_text))
+        review = SlideReview(slide_number=slide_number, **checker_output.model_dump())
+        review = self.canonicalize_review(normalized_text, review)
+        title_display = f'"{review.title}"' if review.title else "no title"
+        actions_display = f"{len(review.actions)} action(s)" if review.actions else "no actions"
+        print(f"[slide {slide_number:03d}] checked - {review.slide_type.value}, {title_display}, {actions_display}")
+        return review

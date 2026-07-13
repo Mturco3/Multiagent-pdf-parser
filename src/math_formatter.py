@@ -3,17 +3,13 @@ import re
 from pydantic_ai import Agent
 
 from .models import MathReplacementResponse, SlideRewrite
-from .utilities.model_config import (
-    MATH_MODEL,
-    MATH_MODEL_RPD,
-    MATH_MODEL_RPM,
-    WINDOW_SECONDS,
-)
+from .utilities.model_config import MATH_MODEL, MATH_MODEL_RPD, MATH_MODEL_RPM, WINDOW_SECONDS
 from .utilities.model_retry import get_cached_agent, run_with_retry
 from .utilities.prompts import MATH_FORMATTER_PROMPT
 from .utilities.rate_limit import RequestPacer
 
 math_agents: dict[str, Agent] = {}
+MATH_CANDIDATE_PATTERN = re.compile(r"[=<>±×÷∑∫√^_]|\b(?:alpha|beta|gamma|delta|epsilon|lambda|mu|sigma|theta)\b|\d+\s*[+*/-]\s*\d+", re.IGNORECASE)
 
 
 class MathFormatter:
@@ -25,8 +21,12 @@ class MathFormatter:
 
     def run_math_request(self, prompt: str) -> MathReplacementResponse:
         """Call the math model with pacing and retries for transient provider failures."""
-        runner = lambda text: get_cached_agent(math_agents, MATH_MODEL, MathReplacementResponse, MATH_FORMATTER_PROMPT).run_sync(text).output
+        runner = lambda active_model, text: get_cached_agent(math_agents, active_model, MathReplacementResponse, MATH_FORMATTER_PROMPT).run_sync(text).output
         return run_with_retry(self.pacer, "math", MATH_MODEL, MATH_MODEL_RPM, MATH_MODEL_RPD, runner, prompt, WINDOW_SECONDS)
+
+    def has_math_candidate(self, text: str) -> bool:
+        """Return whether deterministic syntax indicates a possible math expression."""
+        return bool(MATH_CANDIDATE_PATTERN.search(text))
 
     def apply_replacement(self, text: str, original_text: str, latex: str) -> tuple[str, bool]:
         """Replace one standalone math fragment outside existing math spans."""
@@ -76,6 +76,10 @@ class MathFormatter:
             print(f"[slide {slide.slide_number:03d}] skipped (no body text)")
             return slide, MathReplacementResponse(replacements=[])
 
+        if not self.has_math_candidate(slide.text):
+            print(f"[slide {slide.slide_number:03d}] skipped (no math candidates)")
+            return slide, MathReplacementResponse(replacements=[])
+
         print(f"[slide {slide.slide_number:03d}] identifying math...")
         response = self.run_math_request(f"Slide text:\n\n{slide.text}")
 
@@ -96,12 +100,5 @@ class MathFormatter:
             print(f"[slide {slide.slide_number:03d}] skipped replacement: \"{replacement.original_text}\" (no standalone match)")
 
         print(f"[slide {slide.slide_number:03d}] applied {applied_count} replacement(s)")
-        updated_slide = SlideRewrite(
-            slide_number=slide.slide_number,
-            slide_type=slide.slide_type,
-            title=slide.title,
-            is_continuation=slide.is_continuation,
-            text=updated_text,
-            rewrite_mode=slide.rewrite_mode,
-        )
+        updated_slide = SlideRewrite(slide_number=slide.slide_number, slide_type=slide.slide_type, title=slide.title, is_continuation=slide.is_continuation, text=updated_text, rewrite_mode=slide.rewrite_mode)
         return updated_slide, response

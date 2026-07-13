@@ -1,10 +1,10 @@
 import re
 
-PERSONAL_PRONOUNS = re.compile(r"\b(we|you|our|your)\b", re.IGNORECASE)
 STANDARD_BULLET = "-"
-BULLET_PREFIX = re.compile(r"^\s*(?:[\u2022\-*]|\d+[.)]|[A-Za-z][.)])\s*")
+BULLET_PREFIX = re.compile(r"^\s*(?:[\u000f\u2022\-*]|\d+[.)]|[A-Za-z][.)])\s*")
 WHITESPACE = re.compile(r"[ \t]+")
 MOJIBAKE_REPLACEMENTS = (
+    ("\u000f", "\u2022"),
     ("\u00c3\u0192\u00c2\u00a2\u00c3\u00a2\u00e2\u20ac\u0161\u00c2\u00ac\u00c3\u201a\u00c2\u00a2", "\u2022"),
     ("\u00e2\u20ac\u00a2", "\u2022"),
     ("\u00e2\u20ac\u0153", '"'),
@@ -26,7 +26,7 @@ MOJIBAKE_REPLACEMENTS = (
     ("\u00e2\u201a\u00ac", "EUR"),
     ("\u00c2 ", " "),
     ("\u00c2\u00a0", " "),
-    ("\u00c2", ""),
+    ("\u00c2", "")
 )
 
 
@@ -78,11 +78,13 @@ def normalize(text: str) -> str:
     current_bullets: list[str] = []
 
     def flush_paragraph():
+        """Append and clear the current paragraph buffer."""
         if current_paragraph:
             normalized_blocks.append(" ".join(current_paragraph))
             current_paragraph.clear()
 
     def flush_bullets():
+        """Append and clear the current bullet buffer."""
         if current_bullets:
             normalized_blocks.extend(f"{STANDARD_BULLET} {item}" for item in current_bullets)
             current_bullets.clear()
@@ -107,14 +109,3 @@ def normalize(text: str) -> str:
     flush_paragraph()
     flush_bullets()
     return "\n".join(block for block in normalized_blocks if block)
-
-
-def has_personal_pronouns(text: str) -> bool:
-    """Check whether the text contains first or second person pronouns."""
-    return bool(PERSONAL_PRONOUNS.search(repair_text(text)))
-
-
-def has_bullet_lines(raw_text: str) -> bool:
-    """Check whether any line in the text starts with a bullet character."""
-    repaired = repair_text(raw_text)
-    return any(is_bullet_line(clean_line(line)) for line in repaired.splitlines())
