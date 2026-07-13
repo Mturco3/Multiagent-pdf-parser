@@ -1,5 +1,5 @@
 from enum import Enum
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class SlideType(str, Enum):
@@ -27,41 +27,21 @@ class SuggestedAction(BaseModel):
 
 class SlideReviewResponse(BaseModel):
     """LLM-produced review of a slide, without the slide number."""
+
     slide_type: SlideType
     title: str | None
     is_continuation: bool
-    key_concepts: list[str]
-    summary: str | None
     actions: list[SuggestedAction]
 
 
 class SlideReview(BaseModel):
     """Complete review of a slide, including its position in the deck."""
+
     slide_number: int
     slide_type: SlideType
     title: str | None
     is_continuation: bool
-    key_concepts: list[str]
-    summary: str | None
     actions: list[SuggestedAction]
-    reviewer_approved: bool = True
-    reviewer_feedback: str | None = None
-    checker_attempts: int = 1
-
-
-class ReviewApprovalResponse(BaseModel):
-    """Reviewer verdict on whether a proposed slide edit plan is safe to apply."""
-    approved: bool
-    reason: str | None
-    retry_instruction: str | None
-
-
-class RewriteApprovalResponse(BaseModel):
-    """Reviewer verdict on whether a rewritten slide body and title are acceptable."""
-    approved: bool
-    reason: str | None
-    retry_instruction: str | None
-    keep_title: bool = True
 
 
 class HeadingAction(str, Enum):
@@ -72,9 +52,11 @@ class HeadingAction(str, Enum):
 
 class HeadingChange(BaseModel):
     """A single heading change identified by the title analysis agent."""
+
+    heading_index: int = Field(ge=1)
     original_heading: str
     action: HeadingAction
-    new_level: int | None
+    new_level: int | None = Field(default=None, ge=1, le=4)
     new_text: str | None
 
 
@@ -110,12 +92,13 @@ class QualityReport(BaseModel):
 
 class SlideRewrite(BaseModel):
     """Per-slide rewrite result stored as JSON artifact."""
+
     slide_number: int
-    slide_type: str
+    slide_type: SlideType
     title: str | None
     is_continuation: bool
     text: str
-    rewrite_mode: str = "rewrite_review_v2"
+    rewrite_mode: str = "validated_rewrite_v3"
 
 
 class MathReplacement(BaseModel):
