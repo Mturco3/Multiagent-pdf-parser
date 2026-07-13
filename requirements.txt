@@ -1,7 +1,9 @@
 # Core dependencies
-pymupdf
-pydantic
-pydantic-ai
-httpx
-PyYAML
-python-dotenv
+pymupdf>=1.27,<2
+pydantic>=2.12,<3
+pydantic-ai>=1.103,<2
+httpx>=0.28,<1
+PyYAML>=6,<7
+python-dotenv>=1.1,<2
+streamlit>=1.59,<2
+tzdata>=2025.2
