@@ -25,6 +25,8 @@ def parse_args() -> argparse.Namespace:
 def main():
     """Load configuration and run the transcript pipeline."""
     args = parse_args()
+    config = None
+    clear_cache_once = False
     if args.pdf_path:
         pdf_path = " ".join(args.pdf_path).strip()
         clear_cache = args.clear_cache
@@ -33,16 +35,18 @@ def main():
         with open(config_path, "r", encoding="utf-8") as file_handle:
             config = yaml.safe_load(file_handle)
         pdf_path = config["input_pdf"]
-        clear_cache = args.clear_cache or bool(config.get("clear_cache_once", False))
-        if clear_cache:
-            config["clear_cache_once"] = False
-            with open(config_path, "w", encoding="utf-8") as file_handle:
-                yaml.safe_dump(config, file_handle, sort_keys=False, allow_unicode=True)
+        clear_cache_once = bool(config.get("clear_cache_once", False))
+        clear_cache = args.clear_cache or clear_cache_once
 
     from src.pipeline import Pipeline
 
     pipeline = Pipeline(pdf_path, clear_cache=clear_cache)
     pipeline.run()
+
+    if config is not None and clear_cache_once:
+        config["clear_cache_once"] = False
+        with open(config_path, "w", encoding="utf-8") as file_handle:
+            yaml.safe_dump(config, file_handle, sort_keys=False, allow_unicode=True)
 
 
 if __name__ == "__main__":

@@ -1,12 +1,11 @@
-import io
 import os
 import sys
 import tempfile
-import threading
-import contextlib
 
 import streamlit as st
 from dotenv import load_dotenv
+
+from src.utilities.rate_limit import DailyQuotaExceededError
 
 load_dotenv()
 
@@ -15,89 +14,58 @@ if hasattr(sys.stdout, "reconfigure"):
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
+
+def initialize_session_state():
+    """Initialize generated output fields that must survive Streamlit reruns."""
+    if "generated_document" not in st.session_state:
+        st.session_state.generated_document = None
+    if "generated_filename" not in st.session_state:
+        st.session_state.generated_filename = None
+
+
+def generate_notes(uploaded_file) -> tuple[str, str]:
+    """Run one upload in an isolated temporary workspace and return its Markdown."""
+    safe_filename = os.path.basename(uploaded_file.name) or "lecture.pdf"
+    output_filename = f"{os.path.splitext(safe_filename)[0]}.md"
+    with tempfile.TemporaryDirectory(prefix="lecture_notes_") as temp_dir:
+        temp_pdf = os.path.join(temp_dir, safe_filename)
+        with open(temp_pdf, "wb") as file_handle:
+            file_handle.write(uploaded_file.getbuffer())
+        cache_root = os.path.join(temp_dir, "cache")
+        from src.pipeline import Pipeline
+        pipeline = Pipeline(temp_pdf, clear_cache=False, cache_root=cache_root)
+        document = pipeline.run()
+    return document, output_filename
+
+
+def render_document(document: str, filename: str):
+    """Render preview, raw Markdown, and a persistent download action."""
+    st.success("Pipeline complete!")
+    preview_tab, raw_tab = st.tabs(["Preview", "Raw Markdown"])
+    with preview_tab:
+        st.markdown(document)
+    with raw_tab:
+        st.code(document, language="markdown")
+    st.download_button(label="Download Markdown", data=document, file_name=filename, mime="text/markdown")
+
+
 st.set_page_config(page_title="Lecture Notes Generator", layout="wide")
+initialize_session_state()
 st.title("Lecture Notes Generator")
-st.caption("Upload PDF lecture slides and convert them into polished Markdown notes.")
-
-
-class StreamlitLogStream:
-    """Writable stream that captures text and updates a Streamlit container live."""
-
-    def __init__(self, container):
-        """Initialize with a Streamlit container for live log display."""
-        self.container = container
-        self.buffer = io.StringIO()
-
-    def write(self, text):
-        """Append text to the buffer and refresh the displayed log."""
-        self.buffer.write(text)
-        self.container.code(self.buffer.getvalue(), language="text")
-
-    def flush(self):
-        """No-op flush to satisfy the stream interface."""
-        pass
-
-    def getvalue(self):
-        """Return the full captured log text."""
-        return self.buffer.getvalue()
-
+st.caption("Upload lecture slides to generate Markdown notes. The PDF is sent to the configured Google model and temporary upload files are deleted after processing.")
 
 uploaded_file = st.file_uploader("Upload a PDF", type=["pdf"])
-clear_cache = st.checkbox("Clear cache before running", value=False)
+if uploaded_file is not None and st.button("Generate Notes", type="primary"):
+    try:
+        with st.spinner("Generating notes..."):
+            generated_document, generated_filename = generate_notes(uploaded_file)
+        st.session_state.generated_document = generated_document
+        st.session_state.generated_filename = generated_filename
+    except DailyQuotaExceededError as error:
+        st.error(f"Model quota exhausted: {error}")
+    except Exception as error:
+        st.exception(error)
 
-if uploaded_file is not None:
-    if st.button("Generate Notes", type="primary"):
-        # Save uploaded file to a temp location
-        temp_dir = tempfile.mkdtemp()
-        temp_pdf = os.path.join(temp_dir, uploaded_file.name)
-        with open(temp_pdf, "wb") as f:
-            f.write(uploaded_file.getbuffer())
-
-        # Live log area
-        log_expander = st.expander("Pipeline Log", expanded=True)
-        log_container = log_expander.empty()
-        log_stream = StreamlitLogStream(log_container)
-
-        result = {}
-
-        def thread_target():
-            """Execute the pipeline on a dedicated thread with stdout redirected."""
-            try:
-                with contextlib.redirect_stdout(log_stream):
-                    from src.pipeline import Pipeline
-                    pipeline = Pipeline(temp_pdf, clear_cache=clear_cache)
-                    pipeline.run()
-                    result["pipeline"] = pipeline
-            except Exception as error:
-                result["error"] = error
-
-        with st.spinner("Running pipeline (this takes several minutes)..."):
-            worker = threading.Thread(target=thread_target)
-            worker.start()
-            worker.join()
-
-        if "error" in result:
-            st.error(f"Pipeline failed: {result['error']}")
-        elif "pipeline" in result:
-            pipeline = result["pipeline"]
-            output_path = os.path.join(pipeline.cache_dir, f"{pipeline.pdf_name}.md")
-            with open(output_path, encoding="utf-8") as fh:
-                document = fh.read()
-
-            st.success("Pipeline complete!")
-            st.divider()
-
-            tab_preview, tab_raw = st.tabs(["Preview", "Raw Markdown"])
-
-            with tab_preview:
-                st.markdown(document)
-
-            with tab_raw:
-                st.code(document, language="markdown")
-
-            st.download_button(
-                label="Download Markdown",
-                data=document,
-                file_name=f"{os.path.splitext(uploaded_file.name)[0]}.md",
-                mime="text/markdown"
-            )
+if st.session_state.generated_document and st.session_state.generated_filename:
+    st.divider()
+    render_document(st.session_state.generated_document, st.session_state.generated_filename)
