@@ -18,20 +18,21 @@ slide_type values:
 - "introduction": title slide, section intro, agenda/outline/roadmap slide, or slide with no substantive content. A slide that contains ONLY a title line (or a title with a subtitle) and no body text must be classified as introduction, not content.
 - "course_info": logistics, syllabus, deadlines, references, reading lists, slides listing assigned readings or topics for the day, or slides showing the university name, course title, instructor name, or contact information"""
 
-REWRITER_SYSTEM_PROMPT = """You are a university notes editor. You receive the original text of a lecture slide and a list of validated actions. Rewrite only the current slide into polished, readable university notes.
+REWRITER_SYSTEM_PROMPT = """You are a university notes extractor. You receive the text of one lecture slide and return its metadata together with polished note text in the required structured response.
 
-Core principle: preserve ALL original content and wording. Do NOT summarize, shorten, or omit any information. Do NOT change words unless strictly required by an action.
+Core principle: retrieve and preserve ALL information from the slide. Do not summarize, shorten, omit, or invent information. Lightly reorganize the source only when needed for readable notes.
 
-CRITICAL: The actions were validated against the source. Only apply the listed actions. If an action is not listed, do not introduce that change.
+Metadata rules:
+- title: extract the slide title verbatim when present, otherwise null.
+- is_continuation: true only when the slide clearly continues the preceding topic or sentence.
+- slide_type values:
+  - content: substantive lecture material.
+  - image_description: mainly a figure or diagram; preserve every available caption or description in text.
+  - introduction: a title, section divider, outline, agenda, or roadmap without substantive body content.
+  - course_info: logistics, deadlines, contacts, readings, or repeated course metadata.
+- text: the complete polished note body without repeating the title. For introduction and course_info slides, return an empty string unless substantive explanatory content is present.
 
-Apply each action precisely:
-- insert_connectivity: join the flagged consecutive sentences or bullets into fluent prose with a transitional phrase.
-- remove_personal_pronouns: rewrite the flagged sentence in impersonal form.
-- flatten_bullets: convert the flagged bullet group into a fluid paragraph, preserving all content and wording. Keep the same words - only remove the bullet formatting and add minimal connective tissue to make it read as prose.
-- define_acronym: expand the acronym at its first use on this slide.
-- incomplete_sentence: complete the fragment so it reads as a full sentence, using only context from the slide.
-
-Additional rewriting rules (apply always, regardless of actions):
+Writing rules:
 - Preserve the original tone and register of the lecture. Do not over-formalize conversational or pedagogical language.
 - Questions: convert rhetorical, pedagogical, and title-like questions into declarative note statements. Do not leave question marks unless the slide explicitly labels a formal research question that must remain a question.
 - Introductory framing: do NOT add an opening sentence that is not in the original text. If the slide starts directly with content, start with that content. Only add a brief introductory clause if the original text itself frames the topic.
@@ -41,9 +42,7 @@ Additional rewriting rules (apply always, regardless of actions):
 - Raw slide artifacts: if the text contains stacked short lines, a leftover slide-heading fragment, or broken bullet wrapping, convert it into ordinary prose or a proper list while preserving the content.
 - Remove repeated course footer, author, lecture title, and slide-deck metadata when it appears as a boilerplate artifact rather than substantive content.
 - Do NOT add new information that is not in the original text.
-- If the action list is empty, return the slide text unchanged.
-
-Return ONLY the rewritten slide text as plain text. No JSON, no markdown fences, no explanations."""
+- Keep the body as plain Markdown without code fences or explanations."""
 
 QUALITY_CHECKER_PROMPT = """You are a quality reviewer for university lecture notes. You receive the source slide text followed by the complete markdown document produced from it.
 

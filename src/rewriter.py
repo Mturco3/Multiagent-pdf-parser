@@ -3,7 +3,7 @@ from collections import Counter
 
 from pydantic_ai import Agent
 
-from .models import SlideReview, SlideRewrite, SlideType
+from .models import SlideRewrite, SlideRewriteResponse, SlideType
 from .utilities.model_config import REWRITER_MODEL, REWRITER_MODEL_RPD, REWRITER_MODEL_RPM, WINDOW_SECONDS
 from .utilities.model_retry import get_cached_agent, run_with_retry
 from .utilities.normalizer import normalize
@@ -16,36 +16,51 @@ rewriter_agents: dict[str, Agent] = {}
 
 
 class LLMRewriter:
-    """Apply validated edit actions while preserving source-slide content."""
+    """Extract structured notes directly from one source slide."""
 
     def __init__(self):
         """Initialize model pacing for rewrite requests."""
         self.pacer = RequestPacer(WINDOW_SECONDS)
 
-    def run_rewriter_request(self, prompt: str) -> str:
-        """Call the rewrite model with shared rate limiting and retries."""
-        runner = lambda active_model, text: get_cached_agent(rewriter_agents, active_model, str, REWRITER_SYSTEM_PROMPT).run_sync(text).output
+    def run_rewriter_request(self, prompt: str) -> SlideRewriteResponse:
+        """Call the direct-extraction model with shared rate limiting and retries."""
+        runner = lambda active_model, text: get_cached_agent(rewriter_agents, active_model, SlideRewriteResponse, REWRITER_SYSTEM_PROMPT).run_sync(text).output
         return run_with_retry(self.pacer, "rewriter", REWRITER_MODEL, REWRITER_MODEL_RPM, REWRITER_MODEL_RPD, runner, prompt, WINDOW_SECONDS)
 
-    def build_introduction_output(self, review: SlideReview) -> SlideRewrite | None:
-        """Return a heading-only output for a titled introduction slide."""
-        if not review.title:
-            return None
-        return SlideRewrite(slide_number=review.slide_number, slide_type=review.slide_type, title=review.title, is_continuation=False, text="", rewrite_mode="introduction_heading_v3")
-
-    def extract_body_text(self, slide_text: str, review: SlideReview) -> str:
+    def extract_body_text(self, slide_text: str, title: str | None) -> str:
         """Remove an isolated title and trailing page number from normalized text."""
         lines = [line.strip() for line in normalize(slide_text).splitlines() if line.strip()]
-        if review.title and lines and lines[0] == review.title:
+        if title and lines and lines[0] == title:
             lines = lines[1:]
         if lines and lines[-1].isdigit():
             lines = lines[:-1]
         return "\n".join(lines).strip()
 
-    def build_passthrough_output(self, slide_text: str, review: SlideReview) -> SlideRewrite:
-        """Return deterministic source text when no model rewrite is required."""
-        body_text = self.extract_body_text(slide_text, review)
-        return SlideRewrite(slide_number=review.slide_number, slide_type=review.slide_type, title=review.title, is_continuation=review.is_continuation, text=body_text, rewrite_mode="deterministic_passthrough_v3")
+    def get_source_title(self, slide_text: str) -> str | None:
+        """Return a plausible verbatim title from the first normalized line."""
+        first_line = normalize(slide_text).split("\n", 1)[0].strip()
+        return first_line if first_line and len(first_line) <= 160 else None
+
+    def validate_title(self, slide_text: str, proposed_title: str | None) -> str | None:
+        """Keep only a title that occurs verbatim in the source slide."""
+        normalized_text = normalize(slide_text)
+        if proposed_title and proposed_title in normalized_text:
+            return proposed_title
+        return self.get_source_title(slide_text)
+
+    def build_fallback_output(self, slide_number: int, slide_text: str) -> SlideRewrite:
+        """Preserve normalized source text when direct extraction is unavailable."""
+        title = self.get_source_title(slide_text)
+        body_text = self.extract_body_text(slide_text, title)
+        slide_type = SlideType.CONTENT if body_text else SlideType.INTRODUCTION
+        return SlideRewrite(
+            slide_number=slide_number,
+            slide_type=slide_type,
+            title=title,
+            is_continuation=False,
+            text=body_text,
+            rewrite_mode="direct_fallback_v4",
+        )
 
     def calculate_source_coverage(self, source_text: str, rewritten_text: str) -> float:
         """Measure how many significant source tokens remain in a proposed rewrite."""
@@ -58,36 +73,42 @@ class LLMRewriter:
         preserved_count = sum(min(count, rewritten_counts[word]) for word, count in source_counts.items())
         return preserved_count / len(source_words)
 
-    def rewrite_one(self, slide_text: str, review: SlideReview) -> SlideRewrite | None:
-        """Rewrite one slide only when validated actions require model editing."""
-        if review.slide_type == SlideType.COURSE_INFO:
-            print(f"[slide {review.slide_number:03d}] skipped ({review.slide_type.value})")
-            return None
-        if review.slide_type == SlideType.INTRODUCTION:
-            print(f"[slide {review.slide_number:03d}] heading only ({review.slide_type.value})")
-            return self.build_introduction_output(review)
-
-        fallback = self.build_passthrough_output(slide_text, review)
-        if not review.actions:
-            print(f"[slide {review.slide_number:03d}] no validated actions; preserving extracted body text")
+    def rewrite_one(self, slide_number: int, slide_text: str) -> SlideRewrite:
+        """Extract complete structured notes from one slide in a single model call."""
+        fallback = self.build_fallback_output(slide_number, slide_text)
+        if len(normalize(slide_text).strip()) < 10:
+            print(f"[slide {slide_number:03d}] skipped model request (empty)")
             return fallback
 
-        actions_text = "\n".join(f'- {action.action.value}: "{action.original_fragment}"' for action in review.actions)
-        prompt = f"Slide title: {review.title or '(no title)'}\n\nOriginal slide text:\n\n{fallback.text}\n\nActions to apply:\n{actions_text}"
-        print(f"[slide {review.slide_number:03d}] rewriting ({len(review.actions)} validated action(s))...")
+        prompt = f"Slide number: {slide_number}\n\nSlide text:\n\n{normalize(slide_text)}"
+        print(f"[slide {slide_number:03d}] extracting notes directly...")
 
         try:
-            rewritten_text = self.run_rewriter_request(prompt).strip()
+            response = self.run_rewriter_request(prompt)
         except DailyQuotaExceededError:
             raise
         except Exception as error:
-            print(f"[warn] Slide {review.slide_number:03d} rewrite failed; preserving source text ({error})")
+            print(f"[warn] Slide {slide_number:03d} extraction failed; preserving source text ({error})")
             return fallback
 
-        source_coverage = self.calculate_source_coverage(fallback.text, rewritten_text)
-        if not rewritten_text or source_coverage < MINIMUM_SOURCE_WORD_COVERAGE:
-            print(f"[warn] Slide {review.slide_number:03d} rewrite failed source coverage ({source_coverage:.0%}); preserving source text")
+        title = self.validate_title(slide_text, response.title)
+        rewritten_text = response.text.strip()
+        source_body = self.extract_body_text(slide_text, title)
+        source_coverage = self.calculate_source_coverage(source_body, rewritten_text)
+        substantive_slide = response.slide_type in {SlideType.CONTENT, SlideType.IMAGE_DESCRIPTION}
+        if substantive_slide and (not rewritten_text or source_coverage < MINIMUM_SOURCE_WORD_COVERAGE):
+            print(f"[warn] Slide {slide_number:03d} extraction failed source coverage ({source_coverage:.0%}); preserving source text")
             return fallback
 
-        print(f"[slide {review.slide_number:03d}] done")
-        return SlideRewrite(slide_number=review.slide_number, slide_type=review.slide_type, title=review.title, is_continuation=review.is_continuation, text=rewritten_text, rewrite_mode="validated_rewrite_v3")
+        if response.slide_type in {SlideType.INTRODUCTION, SlideType.COURSE_INFO} and not source_body:
+            rewritten_text = ""
+
+        print(f"[slide {slide_number:03d}] extracted - {response.slide_type.value}")
+        return SlideRewrite(
+            slide_number=slide_number,
+            slide_type=response.slide_type,
+            title=title,
+            is_continuation=response.is_continuation,
+            text=rewritten_text,
+            rewrite_mode="direct_extraction_v4",
+        )

@@ -89,8 +89,8 @@ def get_model_rpd(model_name: str, env_name: str) -> int:
 
 
 CHECKER_MODEL = get_env_text("CHECKER_MODEL", DEFAULT_MODEL)
-REWRITER_MODEL = get_env_text("REWRITER_MODEL", CHECKER_MODEL)
-MATH_MODEL = get_env_text("MATH_MODEL", CHECKER_MODEL)
+REWRITER_MODEL = get_env_text("REWRITER_MODEL", DEFAULT_MODEL)
+MATH_MODEL = get_env_text("MATH_MODEL", DEFAULT_MODEL)
 TITLE_MODEL = get_env_text("TITLE_MODEL", DEFAULT_MODEL)
 QUALITY_IDENTIFIER_MODEL = get_env_text("QUALITY_IDENTIFIER_MODEL", DEFAULT_MODEL)
 QUALITY_FIXER_MODEL = get_env_text("QUALITY_FIXER_MODEL", DEFAULT_MODEL)
@@ -116,8 +116,7 @@ FALLBACK_MODEL_RPD = get_model_rpd(FALLBACK_MODEL, "FALLBACK_MODEL_RPD")
 def get_model_summary() -> list[tuple[str, str, int, int]]:
     """Return the active stage model configuration in display order."""
     return [
-        ("checker", CHECKER_MODEL, CHECKER_MODEL_RPM, CHECKER_MODEL_RPD),
-        ("rewriter", REWRITER_MODEL, REWRITER_MODEL_RPM, REWRITER_MODEL_RPD),
+        ("note_extractor", REWRITER_MODEL, REWRITER_MODEL_RPM, REWRITER_MODEL_RPD),
         ("math", MATH_MODEL, MATH_MODEL_RPM, MATH_MODEL_RPD),
         ("title", TITLE_MODEL, TITLE_MODEL_RPM, TITLE_MODEL_RPD),
         ("quality_identifier", QUALITY_IDENTIFIER_MODEL, QUALITY_IDENTIFIER_MODEL_RPM, QUALITY_IDENTIFIER_MODEL_RPD),

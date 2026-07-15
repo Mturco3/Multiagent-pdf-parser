@@ -73,16 +73,16 @@ python -m streamlit run app.py
 The default model is `google:gemma-4-26b-a4b-it`. Repeated HTTP 503 responses switch the affected request to `google:gemma-4-31b-it`. Override stages or the fallback in `.env`:
 
 ```env
-CHECKER_MODEL=google:gemma-4-26b-a4b-it
 REWRITER_MODEL=google:gemma-4-26b-a4b-it
 MATH_MODEL=google:gemma-4-26b-a4b-it
 TITLE_MODEL=google:gemma-4-26b-a4b-it
 QUALITY_IDENTIFIER_MODEL=google:gemma-4-26b-a4b-it
 QUALITY_FIXER_MODEL=google:gemma-4-26b-a4b-it
 FALLBACK_MODEL=google:gemma-4-31b-it
+MODEL_REQUEST_TIMEOUT_SECONDS=60
 ```
 
-RPM and RPD values can be overridden with the corresponding `*_RPM` and `*_RPD` variables. Set `MODEL_INPUT_TPM` to the active project input-token-per-minute quota when local TPM pacing is desired. Google applies quotas per project and resets RPD at midnight Pacific time, so limits should be copied from the active AI Studio project rather than assumed from documentation.
+The rewriter is the direct per-slide note extractor; there is no separate per-slide checker request. RPM and RPD values can be overridden with the corresponding `*_RPM` and `*_RPD` variables. Set `MODEL_INPUT_TPM` to the active project input-token-per-minute quota when local TPM pacing is desired. Google applies quotas per project and resets RPD at midnight Pacific time, so limits should be copied from the active AI Studio project rather than assumed from documentation.
 
 ## Output and privacy
 

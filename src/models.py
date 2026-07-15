@@ -101,6 +101,15 @@ class SlideRewrite(BaseModel):
     rewrite_mode: str = "validated_rewrite_v3"
 
 
+class SlideRewriteResponse(BaseModel):
+    """LLM-produced slide metadata and note text without cache metadata."""
+
+    slide_type: SlideType
+    title: str | None
+    is_continuation: bool
+    text: str
+
+
 class MathReplacement(BaseModel):
     """A single math expression with its LaTeX equivalent."""
     original_text: str

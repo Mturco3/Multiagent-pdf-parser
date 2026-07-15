@@ -7,18 +7,17 @@ from collections.abc import Callable
 
 from pydantic import ValidationError
 
-from .checker import LLMChecker
 from .math_formatter import MathFormatter
-from .models import MathReplacementResponse, QualityReport, SlideReview, SlideRewrite, SlideType, TitleAnalysis
+from .models import MathReplacementResponse, QualityReport, SlideRewrite, SlideRewriteResponse, SlideType, TitleAnalysis
 from .quality_checker import QualityChecker
 from .rewriter import LLMRewriter
 from .title_editor import TitleEditor
 from .transcriber import CACHE_DIR, Transcriber, get_file_hash
-from .utilities.model_config import CHECKER_MODEL, FALLBACK_MODEL, MATH_MODEL, QUALITY_FIXER_MODEL, QUALITY_IDENTIFIER_MODEL, REWRITER_MODEL, TITLE_MODEL, get_model_summary
-from .utilities.prompts import CHECKER_SYSTEM_PROMPT, MATH_FORMATTER_PROMPT, QUALITY_CHECKER_PROMPT, QUALITY_FIXER_PROMPT, REWRITER_SYSTEM_PROMPT, TITLE_IDENTIFIER_PROMPT
+from .utilities.model_config import FALLBACK_MODEL, MATH_MODEL, QUALITY_FIXER_MODEL, QUALITY_IDENTIFIER_MODEL, REWRITER_MODEL, TITLE_MODEL, get_model_summary
+from .utilities.prompts import MATH_FORMATTER_PROMPT, QUALITY_CHECKER_PROMPT, QUALITY_FIXER_PROMPT, REWRITER_SYSTEM_PROMPT, TITLE_IDENTIFIER_PROMPT
 
-REWRITE_CACHE_MODES = {"validated_rewrite_v3", "deterministic_passthrough_v3", "introduction_heading_v3"}
-CACHE_SOURCE_VERSION = "pipeline_cache_sources_v3"
+REWRITE_CACHE_MODES = {"direct_extraction_v4", "direct_fallback_v4"}
+CACHE_SOURCE_VERSION = "pipeline_cache_sources_v4"
 
 
 class Pipeline:
@@ -91,13 +90,18 @@ class Pipeline:
                 source_parts.append(json.dumps(part, sort_keys=True, ensure_ascii=False))
         return "\n--- cache-source-part ---\n".join(source_parts)
 
-    def get_review_cache_source(self, slide_text: str) -> str:
-        """Return provenance for checker artifacts."""
-        return self.get_cache_source(CACHE_SOURCE_VERSION, "review", CHECKER_MODEL, FALLBACK_MODEL, CHECKER_SYSTEM_PROMPT, SlideReview.model_json_schema(), slide_text)
-
-    def get_rewrite_cache_source(self, slide_text: str, review: SlideReview) -> str:
-        """Return provenance for context-independent rewrite artifacts."""
-        return self.get_cache_source(CACHE_SOURCE_VERSION, "rewrite", REWRITER_MODEL, FALLBACK_MODEL, REWRITER_SYSTEM_PROMPT, SlideRewrite.model_json_schema(), slide_text, review.model_dump(mode="json"))
+    def get_rewrite_cache_source(self, slide_text: str) -> str:
+        """Return provenance for direct per-slide extraction artifacts."""
+        return self.get_cache_source(
+            CACHE_SOURCE_VERSION,
+            "direct_rewrite",
+            REWRITER_MODEL,
+            FALLBACK_MODEL,
+            REWRITER_SYSTEM_PROMPT,
+            SlideRewriteResponse.model_json_schema(),
+            SlideRewrite.model_json_schema(),
+            slide_text,
+        )
 
     def get_math_cache_source(self, slide: SlideRewrite) -> str:
         """Return provenance for math-formatting artifacts."""
@@ -160,26 +164,6 @@ class Pipeline:
             return None
         return payload.get("data")
 
-    def save_review_json(self, reviews_dir: str, review: SlideReview, source_text: str):
-        """Persist one validated slide review with source provenance."""
-        filepath = os.path.join(reviews_dir, f"slide_{review.slide_number:03d}_review.json")
-        payload = {"source_hash": self.get_text_hash(source_text), "data": review.model_dump(mode="json")}
-        self.write_json_atomic(filepath, payload)
-
-    def load_review_json(self, reviews_dir: str, slide_number: int, source_text: str) -> SlideReview | None:
-        """Load one review when provenance and schema remain valid."""
-        filepath = os.path.join(reviews_dir, f"slide_{slide_number:03d}_review.json")
-        payload = self.load_json_file(filepath)
-        if not isinstance(payload, dict) or payload.get("source_hash") != self.get_text_hash(source_text):
-            return None
-        review_payload = payload.get("data")
-        if not isinstance(review_payload, dict):
-            return None
-        try:
-            return SlideReview(**review_payload)
-        except ValidationError:
-            return None
-
     def save_slide_json(self, directory: str, slide: SlideRewrite, source_text: str):
         """Persist one rewrite or math slide with source provenance."""
         dir_path = os.path.join(self.cache_dir, directory)
@@ -226,25 +210,25 @@ class Pipeline:
             if filename.endswith(suffix) and filename not in valid_filenames:
                 os.remove(os.path.join(directory, filename))
 
-    def is_outline_review(self, review: SlideReview) -> bool:
-        """Return whether a review represents a deck agenda rather than notes."""
-        if not review.title:
+    def is_outline_slide(self, slide: SlideRewrite) -> bool:
+        """Return whether an extracted slide is a deck agenda rather than notes."""
+        if not slide.title:
             return False
-        normalized_title = review.title.strip().lower().rstrip(":")
+        normalized_title = slide.title.strip().lower().rstrip(":")
         outline_titles = {"agenda", "contents", "outline", "overview", "roadmap", "table of contents", "today", "today's agenda", "today's outline"}
         return normalized_title in outline_titles
 
-    def get_output_slide_numbers(self, reviews: list[SlideReview]) -> list[int]:
+    def get_output_slide_numbers(self, slides: list[SlideRewrite]) -> list[int]:
         """Return slides that should contribute a heading, text, or figure caption."""
         slide_numbers: list[int] = []
-        for review in reviews:
-            if self.is_outline_review(review):
+        for slide in slides:
+            if self.is_outline_slide(slide):
                 continue
-            if review.slide_type == SlideType.COURSE_INFO:
+            if slide.slide_type == SlideType.COURSE_INFO:
                 continue
-            if review.slide_type == SlideType.INTRODUCTION and not review.title:
+            if slide.slide_type == SlideType.INTRODUCTION and not slide.title:
                 continue
-            slide_numbers.append(review.slide_number)
+            slide_numbers.append(slide.slide_number)
         return slide_numbers
 
     def get_slide_number(self, filename: str) -> int:
@@ -304,12 +288,10 @@ class Pipeline:
             with open(filepath, encoding="utf-8") as file_handle:
                 slides.append((slide_number, file_handle.read()))
 
-        reviews_dir = os.path.join(self.cache_dir, "reviews")
-        os.makedirs(reviews_dir, exist_ok=True)
-        reviews = self.run_checker_stage(slides, reviews_dir)
-        output_slide_numbers = self.get_output_slide_numbers(reviews)
-        rewrites = self.run_rewriter_stage(slides, reviews, output_slide_numbers)
-        math_slides = self.run_math_stage(rewrites)
+        rewrites = self.run_rewriter_stage(slides)
+        output_slide_numbers = self.get_output_slide_numbers(rewrites)
+        included_rewrites = [slide for slide in rewrites if slide.slide_number in output_slide_numbers]
+        math_slides = self.run_math_stage(included_rewrites)
 
         self.report_progress("Assembling notes", detail="Combining the processed slides into one Markdown document.")
         print("\n" + "=" * 60)
@@ -329,73 +311,41 @@ class Pipeline:
         self.report_progress("Complete", 1, 1, "The notes are ready to preview and download.")
         return document
 
-    def run_checker_stage(self, slides: list[tuple[int, str]], reviews_dir: str) -> list[SlideReview]:
-        """Run or resume deterministic checker validation for every slide."""
-        expected_filenames = {f"slide_{slide_number:03d}_review.json" for slide_number, text in slides}
-        self.remove_unexpected_files(reviews_dir, expected_filenames, "_review.json")
-        print("=" * 60)
-        print("LLM Checker")
-        print(f"Slides: {len(slides)}")
-        print("=" * 60)
-
-        self.report_progress("Reviewing slide structure", 0, len(slides), "Starting slide classification and edit validation.")
-        checker = LLMChecker()
-        reviews: list[SlideReview] = []
-        for position, (slide_number, text) in enumerate(slides, start=1):
-            self.report_progress("Reviewing slide structure", position - 1, len(slides), f"Checking slide {slide_number} of {len(slides)}.")
-            print(f"[{position}/{len(slides)}]", end=" ", flush=True)
-            source = self.get_review_cache_source(text)
-            cached_review = self.load_review_json(reviews_dir, slide_number, source)
-            if cached_review is not None:
-                print(f"cached - {cached_review.slide_type.value}")
-                reviews.append(cached_review)
-                self.report_progress("Reviewing slide structure", position, len(slides), f"Slide {slide_number} loaded from cache.")
-                continue
-            review = checker.check_one(slide_number, text)
-            self.save_review_json(reviews_dir, review, source)
-            reviews.append(review)
-            self.report_progress("Reviewing slide structure", position, len(slides), f"Finished checking slide {slide_number}.")
-        return reviews
-
-    def run_rewriter_stage(self, slides: list[tuple[int, str]], reviews: list[SlideReview], output_slide_numbers: list[int]) -> list[SlideRewrite]:
-        """Run or resume context-independent rewrites for included slides."""
-        review_by_number = {review.slide_number: review for review in reviews}
-        source_by_number = {slide_number: self.get_rewrite_cache_source(text, review_by_number[slide_number]) for slide_number, text in slides if slide_number in output_slide_numbers}
-        cached = self.load_slide_jsons("rewrites", output_slide_numbers, source_by_number)
+    def run_rewriter_stage(self, slides: list[tuple[int, str]]) -> list[SlideRewrite]:
+        """Run or resume one direct extraction request for every slide."""
+        slide_numbers = [slide_number for slide_number, text in slides]
+        source_by_number = {slide_number: self.get_rewrite_cache_source(text) for slide_number, text in slides}
+        cached = self.load_slide_jsons("rewrites", slide_numbers, source_by_number)
         if cached is not None:
-            print("Loading cached rewrites")
-            self.report_progress("Rewriting slide text", len(cached), len(cached), "Loaded all rewritten slides from cache.")
+            print("Loading cached slide notes")
+            self.report_progress("Extracting slide notes", len(cached), len(cached), "Loaded all slide notes from cache.")
             return cached
 
         rewrites_dir = os.path.join(self.cache_dir, "rewrites")
         os.makedirs(rewrites_dir, exist_ok=True)
-        valid_filenames = {f"slide_{slide_number:03d}.json" for slide_number in output_slide_numbers}
+        valid_filenames = {f"slide_{slide_number:03d}.json" for slide_number in slide_numbers}
         self.remove_unexpected_files(rewrites_dir, valid_filenames, ".json")
         rewriter = LLMRewriter()
         rewrites: list[SlideRewrite] = []
-        output_slides = [(slide_number, text) for slide_number, text in slides if slide_number in output_slide_numbers]
 
         print("\n" + "=" * 60)
-        print("LLM Rewriter")
-        print(f"Slides: {len(output_slides)}")
+        print("Direct LLM Note Extraction")
+        print(f"Slides: {len(slides)}")
         print("=" * 60)
-        self.report_progress("Rewriting slide text", 0, len(output_slides), "Starting source-preserving slide rewrites.")
-        for position, (slide_number, text) in enumerate(output_slides, start=1):
-            self.report_progress("Rewriting slide text", position - 1, len(output_slides), f"Processing slide {slide_number}.")
-            print(f"[{position}/{len(output_slides)}]", end=" ", flush=True)
+        self.report_progress("Extracting slide notes", 0, len(slides), "Starting direct note extraction without a separate checker.")
+        for position, (slide_number, text) in enumerate(slides, start=1):
+            self.report_progress("Extracting slide notes", position - 1, len(slides), f"Sending slide {slide_number} to the notes model.")
+            print(f"[{position}/{len(slides)}]", end=" ", flush=True)
             cached_slide = self.load_slide_json("rewrites", slide_number, source_by_number[slide_number])
             if cached_slide is not None:
-                print("cached rewrite")
+                print("cached notes")
                 rewrites.append(cached_slide)
-                self.report_progress("Rewriting slide text", position, len(output_slides), f"Slide {slide_number} loaded from cache.")
+                self.report_progress("Extracting slide notes", position, len(slides), f"Slide {slide_number} loaded from cache.")
                 continue
-            rewrite = rewriter.rewrite_one(text, review_by_number[slide_number])
-            if rewrite is None:
-                self.report_progress("Rewriting slide text", position, len(output_slides), f"Slide {slide_number} was omitted from the notes.")
-                continue
+            rewrite = rewriter.rewrite_one(slide_number, text)
             self.save_slide_json("rewrites", rewrite, source_by_number[slide_number])
             rewrites.append(rewrite)
-            self.report_progress("Rewriting slide text", position, len(output_slides), f"Finished slide {slide_number}.")
+            self.report_progress("Extracting slide notes", position, len(slides), f"Finished extracting slide {slide_number}.")
         return rewrites
 
     def run_math_stage(self, slides: list[SlideRewrite]) -> list[SlideRewrite]:

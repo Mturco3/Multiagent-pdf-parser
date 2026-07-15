@@ -8,9 +8,8 @@ from unittest.mock import patch
 import fitz
 from pydantic_ai.exceptions import ModelHTTPError
 
-from src.checker import LLMChecker
 from src.math_formatter import MathFormatter
-from src.models import HeadingAction, HeadingChange, IssueType, QualityIssue, QualityReport, SlideReview, SlideType, TitleAnalysis
+from src.models import HeadingAction, HeadingChange, IssueType, QualityIssue, QualityReport, SlideRewriteResponse, SlideType, TitleAnalysis
 from src.pipeline import Pipeline
 from src.quality_checker import QualityChecker
 from src.rewriter import LLMRewriter
@@ -65,12 +64,12 @@ class DocumentProcessingTests(unittest.TestCase):
         cache_root = self.temp_path / "pipeline_cache"
         progress_events = []
 
-        def build_review(checker, slide_number: int, raw_text: str) -> SlideReview:
-            """Return a stable content review without making a network request."""
-            title = raw_text.splitlines()[0]
-            return SlideReview(slide_number=slide_number, slide_type=SlideType.CONTENT, title=title, is_continuation=False, actions=[])
+        extracted_slides = [
+            SlideRewriteResponse(slide_type=SlideType.CONTENT, title=f"Topic {slide_number}", is_continuation=False, text=f"Body content {slide_number}")
+            for slide_number in range(1, 4)
+        ]
 
-        with patch("src.pipeline.LLMChecker.check_one", new=build_review):
+        with patch("src.pipeline.LLMRewriter.run_rewriter_request", side_effect=extracted_slides):
             with patch("src.pipeline.TitleEditor.identify", return_value=TitleAnalysis(changes=[])):
                 with patch("src.pipeline.QualityChecker.check", return_value=QualityReport(issues=[])):
                     document = Pipeline(str(pdf_path), cache_root=str(cache_root), progress_callback=lambda *event: progress_events.append(event)).run()
@@ -80,8 +79,8 @@ class DocumentProcessingTests(unittest.TestCase):
         output_files = list(cache_root.rglob("deck.md"))
         self.assertEqual(len(output_files), 1)
         stages = [event[0] for event in progress_events]
-        self.assertIn("Reviewing slide structure", stages)
-        self.assertIn("Rewriting slide text", stages)
+        self.assertNotIn("Reviewing slide structure", stages)
+        self.assertIn("Extracting slide notes", stages)
         self.assertIn("Formatting mathematics", stages)
         self.assertIn("Checking final quality", stages)
         self.assertEqual(stages[-1], "Complete")
@@ -89,12 +88,6 @@ class DocumentProcessingTests(unittest.TestCase):
     def test_control_character_bullet_is_normalized(self):
         """The sample deck bullet marker must become Markdown."""
         self.assertEqual(normalize("\u000f first\n\u000f second"), "- first\n- second")
-
-    def test_checker_detects_layout_before_normalization(self):
-        """Structural hints must inspect stacked source lines before they are merged."""
-        raw_text = "Topic\nOne\nTwo\nThree\nFour"
-        prompt = LLMChecker().build_checker_prompt(raw_text, normalize(raw_text))
-        self.assertIn("raw_slide_block_detected: yes", prompt)
 
     def test_quality_sanitizer_preserves_real_lists(self):
         """Final deterministic cleanup must not flatten Markdown lists."""
@@ -122,6 +115,18 @@ class DocumentProcessingTests(unittest.TestCase):
         """Coverage validation must identify a rewrite that loses source content."""
         coverage = LLMRewriter().calculate_source_coverage("alpha beta gamma delta", "alpha")
         self.assertLess(coverage, 0.65)
+
+    def test_rewriter_extracts_notes_without_checker_review(self):
+        """One direct response must provide both metadata and note text."""
+        response = SlideRewriteResponse(slide_type=SlideType.CONTENT, title="Topic", is_continuation=False, text="Alpha beta gamma delta.")
+        rewriter = LLMRewriter()
+        with patch.object(rewriter, "run_rewriter_request", return_value=response) as request:
+            slide = rewriter.rewrite_one(7, "Topic\nAlpha beta gamma delta.")
+        self.assertEqual(slide.slide_number, 7)
+        self.assertEqual(slide.title, "Topic")
+        self.assertEqual(slide.text, "Alpha beta gamma delta.")
+        self.assertEqual(slide.rewrite_mode, "direct_extraction_v4")
+        request.assert_called_once()
 
     def test_math_prefilter_skips_plain_prose(self):
         """Plain prose should not consume a math-model request."""

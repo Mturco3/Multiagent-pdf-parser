@@ -3,8 +3,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from src.models import SlideReview, SlideRewrite, SlideType
-from src.pipeline import CHECKER_SYSTEM_PROMPT, Pipeline
+from src.models import SlideRewrite, SlideType
+from src.pipeline import REWRITER_SYSTEM_PROMPT, Pipeline
 
 
 class PipelineCacheSourceTests(unittest.TestCase):
@@ -20,23 +20,23 @@ class PipelineCacheSourceTests(unittest.TestCase):
         """Remove all temporary cache artifacts."""
         self.temp_directory.cleanup()
 
-    def test_review_cache_source_changes_when_prompt_changes(self):
-        """Changing checker instructions must invalidate review artifacts."""
-        baseline = self.pipeline.get_review_cache_source("Slide body")
-        with patch("src.pipeline.CHECKER_SYSTEM_PROMPT", CHECKER_SYSTEM_PROMPT + "\nAdditional rule."):
-            changed = self.pipeline.get_review_cache_source("Slide body")
+    def test_rewrite_cache_source_changes_when_prompt_changes(self):
+        """Changing direct extraction instructions must invalidate slide artifacts."""
+        baseline = self.pipeline.get_rewrite_cache_source("Slide body")
+        with patch("src.pipeline.REWRITER_SYSTEM_PROMPT", REWRITER_SYSTEM_PROMPT + "\nAdditional rule."):
+            changed = self.pipeline.get_rewrite_cache_source("Slide body")
         self.assertNotEqual(baseline, changed)
 
-    def test_review_cache_source_changes_when_model_changes(self):
-        """Changing the checker model must invalidate review artifacts."""
-        baseline = self.pipeline.get_review_cache_source("Slide body")
-        with patch("src.pipeline.CHECKER_MODEL", "google:different-model"):
-            changed = self.pipeline.get_review_cache_source("Slide body")
+    def test_rewrite_cache_source_changes_when_model_changes(self):
+        """Changing the note extraction model must invalidate slide artifacts."""
+        baseline = self.pipeline.get_rewrite_cache_source("Slide body")
+        with patch("src.pipeline.REWRITER_MODEL", "google:different-model"):
+            changed = self.pipeline.get_rewrite_cache_source("Slide body")
         self.assertNotEqual(baseline, changed)
 
     def test_slide_cache_rejects_stale_source_hash(self):
         """A per-slide artifact must not survive a source change."""
-        slide = SlideRewrite(slide_number=1, slide_type=SlideType.CONTENT, title="Topic", is_continuation=False, text="Body text.")
+        slide = SlideRewrite(slide_number=1, slide_type=SlideType.CONTENT, title="Topic", is_continuation=False, text="Body text.", rewrite_mode="direct_extraction_v4")
         source_v1 = self.pipeline.get_cache_source("rewrite", "v1")
         source_v2 = self.pipeline.get_cache_source("rewrite", "v2")
         self.pipeline.save_slide_json("rewrites", slide, source_v1)
@@ -62,13 +62,13 @@ class PipelineCacheSourceTests(unittest.TestCase):
 
     def test_heading_only_introduction_is_assembled(self):
         """A section introduction must remain visible without body text."""
-        slide = SlideRewrite(slide_number=1, slide_type=SlideType.INTRODUCTION, title="Methods", is_continuation=False, text="", rewrite_mode="introduction_heading_v3")
+        slide = SlideRewrite(slide_number=1, slide_type=SlideType.INTRODUCTION, title="Methods", is_continuation=False, text="", rewrite_mode="direct_extraction_v4")
         self.assertEqual(self.pipeline.assemble([slide]), "## Methods")
 
     def test_image_slide_is_included(self):
         """A figure caption slide must not be dropped from the output set."""
-        review = SlideReview(slide_number=4, slide_type=SlideType.IMAGE_DESCRIPTION, title="Architecture", is_continuation=False, actions=[])
-        self.assertEqual(self.pipeline.get_output_slide_numbers([review]), [4])
+        slide = SlideRewrite(slide_number=4, slide_type=SlideType.IMAGE_DESCRIPTION, title="Architecture", is_continuation=False, text="Diagram")
+        self.assertEqual(self.pipeline.get_output_slide_numbers([slide]), [4])
 
     def test_same_filename_uses_distinct_content_cache(self):
         """Different PDFs with the same basename must receive different cache namespaces."""
