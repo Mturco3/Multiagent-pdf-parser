@@ -3,6 +3,7 @@ import json
 import os
 import shutil
 import uuid
+from collections.abc import Callable
 
 from pydantic import ValidationError
 
@@ -23,7 +24,13 @@ CACHE_SOURCE_VERSION = "pipeline_cache_sources_v3"
 class Pipeline:
     """Convert one lecture PDF into source-aware Markdown notes."""
 
-    def __init__(self, pdf_path: str, clear_cache: bool = False, cache_root: str = CACHE_DIR):
+    def __init__(
+        self,
+        pdf_path: str,
+        clear_cache: bool = False,
+        cache_root: str = CACHE_DIR,
+        progress_callback: Callable[[str, int | None, int | None, str], None] | None = None,
+    ):
         """Initialize input, cache policy, and the provisional output location."""
         self.pdf_path = pdf_path
         self.pdf_name = os.path.splitext(os.path.basename(os.path.normpath(pdf_path)))[0]
@@ -31,6 +38,12 @@ class Pipeline:
         self.cache_dir = os.path.join(cache_root, self.pdf_name)
         self.pdf_fingerprint: str | None = None
         self.clear_cache = clear_cache
+        self.progress_callback = progress_callback
+
+    def report_progress(self, stage: str, current: int | None = None, total: int | None = None, detail: str = ""):
+        """Publish optional UI progress without coupling the pipeline to Streamlit."""
+        if self.progress_callback is not None:
+            self.progress_callback(stage, current, total, detail)
 
     def validate_input_pdf(self):
         """Fail before cache mutation when the input is not a readable PDF file."""
@@ -267,6 +280,7 @@ class Pipeline:
 
     def run(self) -> str:
         """Execute all stages, save the final Markdown document, and return it."""
+        self.report_progress("Preparing", detail="Validating the uploaded PDF and preparing an isolated cache.")
         self.validate_input_pdf()
         self.configure_cache_identity()
         if self.clear_cache:
@@ -274,12 +288,14 @@ class Pipeline:
         os.makedirs(self.cache_dir, exist_ok=True)
         self.print_model_configuration()
 
+        self.report_progress("Extracting slides", detail="Reading text, layout, and images from the PDF.")
         transcriber = Transcriber(self.pdf_path, self.cache_dir)
         transcriptions_dir = transcriber.run()
         slide_filenames = [name for name in os.listdir(transcriptions_dir) if name.startswith("slide_") and name.endswith(".txt")]
         slide_filenames.sort(key=self.get_slide_number)
         if not slide_filenames:
             raise ValueError("The PDF did not produce any readable slides.")
+        self.report_progress("Extracting slides", len(slide_filenames), len(slide_filenames), f"Extracted {len(slide_filenames)} slides.")
 
         slides: list[tuple[int, str]] = []
         for filename in slide_filenames:
@@ -295,6 +311,7 @@ class Pipeline:
         rewrites = self.run_rewriter_stage(slides, reviews, output_slide_numbers)
         math_slides = self.run_math_stage(rewrites)
 
+        self.report_progress("Assembling notes", detail="Combining the processed slides into one Markdown document.")
         print("\n" + "=" * 60)
         print("Assembling document")
         print("=" * 60)
@@ -303,11 +320,13 @@ class Pipeline:
         source_document = "\n\n".join(f"[Slide {slide_number}]\n{text}" for slide_number, text in slides if slide_number in output_slide_numbers)
         document = self.run_quality_stage(source_document, document)
 
+        self.report_progress("Saving document", detail="Writing the final Markdown document.")
         output_path = os.path.join(self.cache_dir, f"{self.pdf_name}.md")
         self.write_text_atomic(output_path, document)
         print("\n" + "=" * 60)
         print(f"[DONE] Final document saved to {output_path}")
         print("=" * 60)
+        self.report_progress("Complete", 1, 1, "The notes are ready to preview and download.")
         return document
 
     def run_checker_stage(self, slides: list[tuple[int, str]], reviews_dir: str) -> list[SlideReview]:
@@ -319,19 +338,23 @@ class Pipeline:
         print(f"Slides: {len(slides)}")
         print("=" * 60)
 
+        self.report_progress("Reviewing slide structure", 0, len(slides), "Starting slide classification and edit validation.")
         checker = LLMChecker()
         reviews: list[SlideReview] = []
         for position, (slide_number, text) in enumerate(slides, start=1):
+            self.report_progress("Reviewing slide structure", position - 1, len(slides), f"Checking slide {slide_number} of {len(slides)}.")
             print(f"[{position}/{len(slides)}]", end=" ", flush=True)
             source = self.get_review_cache_source(text)
             cached_review = self.load_review_json(reviews_dir, slide_number, source)
             if cached_review is not None:
                 print(f"cached - {cached_review.slide_type.value}")
                 reviews.append(cached_review)
+                self.report_progress("Reviewing slide structure", position, len(slides), f"Slide {slide_number} loaded from cache.")
                 continue
             review = checker.check_one(slide_number, text)
             self.save_review_json(reviews_dir, review, source)
             reviews.append(review)
+            self.report_progress("Reviewing slide structure", position, len(slides), f"Finished checking slide {slide_number}.")
         return reviews
 
     def run_rewriter_stage(self, slides: list[tuple[int, str]], reviews: list[SlideReview], output_slide_numbers: list[int]) -> list[SlideRewrite]:
@@ -341,6 +364,7 @@ class Pipeline:
         cached = self.load_slide_jsons("rewrites", output_slide_numbers, source_by_number)
         if cached is not None:
             print("Loading cached rewrites")
+            self.report_progress("Rewriting slide text", len(cached), len(cached), "Loaded all rewritten slides from cache.")
             return cached
 
         rewrites_dir = os.path.join(self.cache_dir, "rewrites")
@@ -355,18 +379,23 @@ class Pipeline:
         print("LLM Rewriter")
         print(f"Slides: {len(output_slides)}")
         print("=" * 60)
+        self.report_progress("Rewriting slide text", 0, len(output_slides), "Starting source-preserving slide rewrites.")
         for position, (slide_number, text) in enumerate(output_slides, start=1):
+            self.report_progress("Rewriting slide text", position - 1, len(output_slides), f"Processing slide {slide_number}.")
             print(f"[{position}/{len(output_slides)}]", end=" ", flush=True)
             cached_slide = self.load_slide_json("rewrites", slide_number, source_by_number[slide_number])
             if cached_slide is not None:
                 print("cached rewrite")
                 rewrites.append(cached_slide)
+                self.report_progress("Rewriting slide text", position, len(output_slides), f"Slide {slide_number} loaded from cache.")
                 continue
             rewrite = rewriter.rewrite_one(text, review_by_number[slide_number])
             if rewrite is None:
+                self.report_progress("Rewriting slide text", position, len(output_slides), f"Slide {slide_number} was omitted from the notes.")
                 continue
             self.save_slide_json("rewrites", rewrite, source_by_number[slide_number])
             rewrites.append(rewrite)
+            self.report_progress("Rewriting slide text", position, len(output_slides), f"Finished slide {slide_number}.")
         return rewrites
 
     def run_math_stage(self, slides: list[SlideRewrite]) -> list[SlideRewrite]:
@@ -376,6 +405,7 @@ class Pipeline:
         cached = self.load_slide_jsons("math", slide_numbers, source_by_number)
         if cached is not None:
             print("Loading cached math-formatted slides")
+            self.report_progress("Formatting mathematics", len(cached), len(cached), "Loaded all math-formatted slides from cache.")
             return cached
 
         formatter = MathFormatter()
@@ -392,13 +422,16 @@ class Pipeline:
         print("Math Formatter")
         print(f"Slides: {len(slides)}")
         print("=" * 60)
+        self.report_progress("Formatting mathematics", 0, len(slides), "Checking slides for mathematical expressions.")
         updated_slides: list[SlideRewrite] = []
-        for slide in slides:
+        for position, slide in enumerate(slides, start=1):
+            self.report_progress("Formatting mathematics", position - 1, len(slides), f"Checking slide {slide.slide_number} for math.")
             source = source_by_number[slide.slide_number]
             cached_slide = self.load_slide_json("math", slide.slide_number, source)
             if cached_slide is not None:
                 print(f"[slide {slide.slide_number:03d}] cached math")
                 updated_slides.append(cached_slide)
+                self.report_progress("Formatting mathematics", position, len(slides), f"Slide {slide.slide_number} loaded from cache.")
                 continue
             updated_slide, response = formatter.format_slide(slide)
             self.save_slide_json("math", updated_slide, source)
@@ -408,10 +441,12 @@ class Pipeline:
             elif os.path.exists(replacement_path):
                 os.remove(replacement_path)
             updated_slides.append(updated_slide)
+            self.report_progress("Formatting mathematics", position, len(slides), f"Finished slide {slide.slide_number}.")
         return updated_slides
 
     def run_title_stage(self, document: str) -> str:
         """Run or resume stable-index heading analysis."""
+        self.report_progress("Editing headings", detail="Checking heading levels and document structure.")
         print("\n" + "=" * 60)
         print("Title Editor")
         print("=" * 60)
@@ -428,6 +463,7 @@ class Pipeline:
 
     def run_quality_stage(self, source_document: str, document: str) -> str:
         """Run or resume source-aware quality review and its final fixed output."""
+        self.report_progress("Checking final quality", detail="Comparing the generated notes with the source slides.")
         print("\n" + "=" * 60)
         print("Quality Checker")
         print("=" * 60)

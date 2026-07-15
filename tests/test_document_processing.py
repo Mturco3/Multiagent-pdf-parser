@@ -63,6 +63,7 @@ class DocumentProcessingTests(unittest.TestCase):
         """All deterministic stages must compose into a final cached document."""
         pdf_path = self.create_test_pdf()
         cache_root = self.temp_path / "pipeline_cache"
+        progress_events = []
 
         def build_review(checker, slide_number: int, raw_text: str) -> SlideReview:
             """Return a stable content review without making a network request."""
@@ -72,12 +73,18 @@ class DocumentProcessingTests(unittest.TestCase):
         with patch("src.pipeline.LLMChecker.check_one", new=build_review):
             with patch("src.pipeline.TitleEditor.identify", return_value=TitleAnalysis(changes=[])):
                 with patch("src.pipeline.QualityChecker.check", return_value=QualityReport(issues=[])):
-                    document = Pipeline(str(pdf_path), cache_root=str(cache_root)).run()
+                    document = Pipeline(str(pdf_path), cache_root=str(cache_root), progress_callback=lambda *event: progress_events.append(event)).run()
 
         self.assertIn("## Topic 1", document)
         self.assertIn("Body content 3", document)
         output_files = list(cache_root.rglob("deck.md"))
         self.assertEqual(len(output_files), 1)
+        stages = [event[0] for event in progress_events]
+        self.assertIn("Reviewing slide structure", stages)
+        self.assertIn("Rewriting slide text", stages)
+        self.assertIn("Formatting mathematics", stages)
+        self.assertIn("Checking final quality", stages)
+        self.assertEqual(stages[-1], "Complete")
 
     def test_control_character_bullet_is_normalized(self):
         """The sample deck bullet marker must become Markdown."""
