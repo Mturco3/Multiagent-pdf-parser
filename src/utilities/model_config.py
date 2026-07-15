@@ -6,6 +6,7 @@ WINDOW_SECONDS = 60
 DEFAULT_MODEL = "google:gemma-4-26b-a4b-it"
 DEFAULT_MODEL_RPM = 10
 DEFAULT_MODEL_RPD = 1000
+FAST_NOTE_MODEL = "groq:openai/gpt-oss-20b"
 
 
 @dataclass(frozen=True)
@@ -19,6 +20,7 @@ class ModelLimit:
 
 
 MODEL_LIMITS = (
+    ModelLimit("Groq GPT-OSS 20B", ("openai/gpt-oss-20b", "gpt-oss-20b"), 30, 1000),
     ModelLimit("Gemini 3.1 Flash Lite", ("gemini-3.1-flash-lite",), 15, 500),
     ModelLimit("Gemini 3.5 Flash", ("gemini-3.5-flash",), 5, 20),
     ModelLimit("Gemini 3 Flash", ("gemini-3-flash",), 5, 20),
@@ -88,8 +90,13 @@ def get_model_rpd(model_name: str, env_name: str) -> int:
     return get_env_int(env_name, get_default_model_limits(model_name)[1], minimum=0)
 
 
+def get_default_note_model() -> str:
+    """Prefer the fast Groq free-tier model when its standard key is configured."""
+    return FAST_NOTE_MODEL if os.getenv("GROQ_API_KEY", "").strip() else DEFAULT_MODEL
+
+
 CHECKER_MODEL = get_env_text("CHECKER_MODEL", DEFAULT_MODEL)
-REWRITER_MODEL = get_env_text("REWRITER_MODEL", DEFAULT_MODEL)
+REWRITER_MODEL = get_env_text("REWRITER_MODEL", get_default_note_model())
 MATH_MODEL = get_env_text("MATH_MODEL", DEFAULT_MODEL)
 TITLE_MODEL = get_env_text("TITLE_MODEL", DEFAULT_MODEL)
 QUALITY_IDENTIFIER_MODEL = get_env_text("QUALITY_IDENTIFIER_MODEL", DEFAULT_MODEL)

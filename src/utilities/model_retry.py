@@ -26,6 +26,14 @@ def get_request_timeout_seconds() -> float:
     return timeout_seconds if timeout_seconds > 0 else DEFAULT_REQUEST_TIMEOUT_SECONDS
 
 
+def get_agent_model_settings(model_name: str) -> dict[str, float | str]:
+    """Return shared request settings with low reasoning for fast slide extraction."""
+    settings: dict[str, float | str] = {"temperature": 0, "timeout": get_request_timeout_seconds()}
+    if model_name.startswith("groq:openai/gpt-oss-"):
+        settings["thinking"] = "low"
+    return settings
+
+
 def get_cached_agent(agent_cache: dict[str, Agent], model_name: str, output_type, instructions: str) -> Agent:
     """Return an Agent for a model, creating it only when needed."""
     agent = agent_cache.get(model_name)
@@ -34,7 +42,7 @@ def get_cached_agent(agent_cache: dict[str, Agent], model_name: str, output_type
             model_name,
             output_type=output_type,
             instructions=instructions,
-            model_settings={"temperature": 0, "timeout": get_request_timeout_seconds()},
+            model_settings=get_agent_model_settings(model_name),
         )
         agent_cache[model_name] = agent
     return agent

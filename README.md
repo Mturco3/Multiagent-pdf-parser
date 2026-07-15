@@ -70,10 +70,11 @@ python -m streamlit run app.py
 
 ## Models and quotas
 
-The default model is `google:gemma-4-26b-a4b-it`. Repeated HTTP 503 responses switch the affected request to `google:gemma-4-31b-it`. Override stages or the fallback in `.env`:
+When `GROQ_API_KEY` is configured, direct per-slide note extraction defaults to the fast `groq:openai/gpt-oss-20b` model. Longer document-wide stages continue to use `google:gemma-4-26b-a4b-it`. Without a Groq key, note extraction also uses the Google default. Repeated HTTP 503 responses switch the affected request to `google:gemma-4-31b-it`. Override stages or the fallback in `.env`:
 
 ```env
-REWRITER_MODEL=google:gemma-4-26b-a4b-it
+GROQ_API_KEY=your-groq-key
+REWRITER_MODEL=groq:openai/gpt-oss-20b
 MATH_MODEL=google:gemma-4-26b-a4b-it
 TITLE_MODEL=google:gemma-4-26b-a4b-it
 QUALITY_IDENTIFIER_MODEL=google:gemma-4-26b-a4b-it
@@ -82,7 +83,7 @@ FALLBACK_MODEL=google:gemma-4-31b-it
 MODEL_REQUEST_TIMEOUT_SECONDS=60
 ```
 
-The rewriter is the direct per-slide note extractor; there is no separate per-slide checker request. RPM and RPD values can be overridden with the corresponding `*_RPM` and `*_RPD` variables. Set `MODEL_INPUT_TPM` to the active project input-token-per-minute quota when local TPM pacing is desired. Google applies quotas per project and resets RPD at midnight Pacific time, so limits should be copied from the active AI Studio project rather than assumed from documentation.
+The rewriter is the direct per-slide note extractor; there is no separate per-slide checker request. RPM and RPD values can be overridden with the corresponding `*_RPM` and `*_RPD` variables. Set `MODEL_INPUT_TPM` to the active project input-token-per-minute quota when local TPM pacing is desired. Provider limits can change, so copy stricter limits from the active provider dashboard when necessary.
 
 ## Output and privacy
 

@@ -15,9 +15,9 @@ from src.quality_checker import QualityChecker
 from src.rewriter import LLMRewriter
 from src.title_editor import TitleEditor
 from src.transcriber import Transcriber
-from src.utilities.model_config import FALLBACK_MODEL
+from src.utilities.model_config import DEFAULT_MODEL, FALLBACK_MODEL, FAST_NOTE_MODEL, get_default_model_limits, get_default_note_model
 from src.utilities.normalizer import normalize
-from src.utilities.model_retry import DEFAULT_REQUEST_TIMEOUT_SECONDS, get_cached_agent, run_with_retry
+from src.utilities.model_retry import DEFAULT_REQUEST_TIMEOUT_SECONDS, get_agent_model_settings, get_cached_agent, run_with_retry
 from src.utilities.rate_limit import RequestPacer
 
 
@@ -166,6 +166,18 @@ class DocumentProcessingTests(unittest.TestCase):
             get_cached_agent({}, "test-model", str, "instructions")
         settings = agent_class.call_args.kwargs["model_settings"]
         self.assertEqual(settings["timeout"], DEFAULT_REQUEST_TIMEOUT_SECONDS)
+
+    def test_groq_note_model_is_selected_only_when_configured(self):
+        """The fast provider must be automatic but retain a Google-only fallback."""
+        with patch.dict(os.environ, {"GROQ_API_KEY": "test-key"}, clear=True):
+            self.assertEqual(get_default_note_model(), FAST_NOTE_MODEL)
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(get_default_note_model(), DEFAULT_MODEL)
+
+    def test_groq_note_model_uses_free_limits_and_low_reasoning(self):
+        """Local pacing and reasoning effort must match the fast note workload."""
+        self.assertEqual(get_default_model_limits(FAST_NOTE_MODEL), (30, 1000))
+        self.assertEqual(get_agent_model_settings(FAST_NOTE_MODEL)["thinking"], "low")
 
 
 if __name__ == "__main__":
