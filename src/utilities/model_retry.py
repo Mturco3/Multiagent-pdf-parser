@@ -1,3 +1,4 @@
+import os
 import time
 from collections.abc import Callable
 from typing import Any
@@ -11,14 +12,30 @@ from .rate_limit import DailyQuotaExceededError, RequestPacer
 
 MAX_RETRIES = 3
 TIMEOUT_RETRY_DELAY_SECONDS = 30.0
+DEFAULT_REQUEST_TIMEOUT_SECONDS = 60.0
 TRANSIENT_STATUS_CODES = {429, 500, 503}
+
+
+def get_request_timeout_seconds() -> float:
+    """Return a positive per-request timeout from the environment."""
+    configured_timeout = os.getenv("MODEL_REQUEST_TIMEOUT_SECONDS", str(DEFAULT_REQUEST_TIMEOUT_SECONDS)).strip()
+    try:
+        timeout_seconds = float(configured_timeout)
+    except ValueError:
+        return DEFAULT_REQUEST_TIMEOUT_SECONDS
+    return timeout_seconds if timeout_seconds > 0 else DEFAULT_REQUEST_TIMEOUT_SECONDS
 
 
 def get_cached_agent(agent_cache: dict[str, Agent], model_name: str, output_type, instructions: str) -> Agent:
     """Return an Agent for a model, creating it only when needed."""
     agent = agent_cache.get(model_name)
     if agent is None:
-        agent = Agent(model_name, output_type=output_type, instructions=instructions, model_settings={"temperature": 0})
+        agent = Agent(
+            model_name,
+            output_type=output_type,
+            instructions=instructions,
+            model_settings={"temperature": 0, "timeout": get_request_timeout_seconds()},
+        )
         agent_cache[model_name] = agent
     return agent
 
@@ -55,8 +72,13 @@ def run_model_attempts(pacer: RequestPacer, request_name: str, model_name: str, 
     """Run all retry attempts against one active model."""
     for attempt in range(1, MAX_RETRIES + 1):
         pacer.acquire_request_slot(model_name, rpm, rpd, request_name, prompt)
+        started_at = time.monotonic()
+        print(f"{request_name} request {attempt}/{MAX_RETRIES} sent to {model_name}...")
         try:
-            return runner(model_name, prompt)
+            result = runner(model_name, prompt)
+            elapsed_seconds = time.monotonic() - started_at
+            print(f"{request_name} request completed in {elapsed_seconds:.1f}s")
+            return result
         except ModelHTTPError as error:
             if error.status_code == 429 and pacer.is_daily_quota_error(error.body):
                 pacer.mark_daily_exhausted(model_name, rpd)
@@ -70,10 +92,15 @@ def run_model_attempts(pacer: RequestPacer, request_name: str, model_name: str, 
             print(f"{request_name} transient error {error.status_code} from {model_name} - retrying in {delay:.1f}s ({attempt}/{MAX_RETRIES})...")
             time.sleep(delay)
         except httpx.TimeoutException:
+            elapsed_seconds = time.monotonic() - started_at
             if attempt >= MAX_RETRIES:
+                print(f"{request_name} request timed out after {elapsed_seconds:.1f}s; no retries remain")
                 raise
 
-            print(f"{request_name} transient timeout from {model_name} - retrying in {TIMEOUT_RETRY_DELAY_SECONDS:.1f}s ({attempt}/{MAX_RETRIES})...")
+            print(
+                f"{request_name} request timed out after {elapsed_seconds:.1f}s from {model_name} "
+                f"- retrying in {TIMEOUT_RETRY_DELAY_SECONDS:.1f}s ({attempt}/{MAX_RETRIES})..."
+            )
             time.sleep(TIMEOUT_RETRY_DELAY_SECONDS)
 
 

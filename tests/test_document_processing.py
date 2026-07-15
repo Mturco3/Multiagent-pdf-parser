@@ -18,7 +18,7 @@ from src.title_editor import TitleEditor
 from src.transcriber import Transcriber
 from src.utilities.model_config import FALLBACK_MODEL
 from src.utilities.normalizer import normalize
-from src.utilities.model_retry import run_with_retry
+from src.utilities.model_retry import DEFAULT_REQUEST_TIMEOUT_SECONDS, get_cached_agent, run_with_retry
 from src.utilities.rate_limit import RequestPacer
 
 
@@ -154,6 +154,13 @@ class DocumentProcessingTests(unittest.TestCase):
             output = run_with_retry(pacer, "test", "primary-model", 10, 100, runner, "prompt", 60)
         self.assertEqual(output, "fallback-output")
         self.assertEqual(attempts.call_args_list[1].args[2], FALLBACK_MODEL)
+
+    def test_model_agent_has_bounded_request_timeout(self):
+        """Every provider request must have an explicit timeout."""
+        with patch("src.utilities.model_retry.Agent") as agent_class:
+            get_cached_agent({}, "test-model", str, "instructions")
+        settings = agent_class.call_args.kwargs["model_settings"]
+        self.assertEqual(settings["timeout"], DEFAULT_REQUEST_TIMEOUT_SECONDS)
 
 
 if __name__ == "__main__":
