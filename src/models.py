@@ -1,9 +1,17 @@
+"""Define the structured data exchanged by the note-processing stages.
+
+The module contains enums and Pydantic models for slide reviews, rewrites,
+heading changes, math replacements, and document-quality reports.
+"""
+
 from enum import Enum
+
 from pydantic import BaseModel, Field
 
 
 class SlideType(str, Enum):
     """Classification of a lecture slide by its content purpose."""
+
     CONTENT = "content"
     IMAGE_DESCRIPTION = "image_description"
     INTRODUCTION = "introduction"
@@ -12,6 +20,7 @@ class SlideType(str, Enum):
 
 class ActionType(str, Enum):
     """Types of editing actions the checker can suggest for a slide."""
+
     INSERT_CONNECTIVITY = "insert_connectivity"
     REMOVE_PERSONAL_PRONOUNS = "remove_personal_pronouns"
     FLATTEN_BULLETS = "flatten_bullets"
@@ -21,6 +30,7 @@ class ActionType(str, Enum):
 
 class SuggestedAction(BaseModel):
     """A single editing action tied to a specific text fragment."""
+
     action: ActionType
     original_fragment: str
 
@@ -46,6 +56,7 @@ class SlideReview(BaseModel):
 
 class HeadingAction(str, Enum):
     """What to do with a heading in the document."""
+
     KEEP = "keep"
     REMOVE = "remove"
 
@@ -67,6 +78,7 @@ class TitleAnalysis(BaseModel):
 
 class IssueType(str, Enum):
     """Types of quality issues that can be flagged in the final document."""
+
     LIST_COLLAPSED = "list_collapsed"
     BULLET_LIST_SHOULD_BE_COLLAPSED = "bullet_list_should_be_collapsed"
     EXCESSIVE_INTRODUCTION = "excessive_introduction"
@@ -80,6 +92,7 @@ class IssueType(str, Enum):
 
 class QualityIssue(BaseModel):
     """A single quality issue found in the final document."""
+
     issue_type: IssueType
     problematic_text: str
     explanation: str
@@ -112,6 +125,7 @@ class SlideRewriteResponse(BaseModel):
 
 class MathReplacement(BaseModel):
     """A single math expression with its LaTeX equivalent."""
+
     original_text: str
     latex: str
     is_display: bool

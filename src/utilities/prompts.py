@@ -1,3 +1,9 @@
+"""Store the system instructions used by every model-backed pipeline stage.
+
+The module defines prompts for slide checking and rewriting, mathematics,
+heading analysis, and final quality identification and correction.
+"""
+
 CHECKER_SYSTEM_PROMPT = """You are a university notes editor. You receive the text of a single lecture slide and return a structured JSON analysis.
 
 Rules:

@@ -1,3 +1,9 @@
+"""Extract structured slide content from PDF lecture decks.
+
+The module defines extracted page data classes, file hashing, and
+``Transcriber`` helpers for layout-aware text extraction and boilerplate removal.
+"""
+
 import hashlib
 import json
 import math
@@ -6,6 +12,7 @@ import re
 import uuid
 from collections import Counter
 from dataclasses import asdict, dataclass
+from typing import Any
 
 from .utilities.normalizer import clean_line, is_bullet_line, repair_text
 
@@ -53,13 +60,13 @@ def get_file_hash(filepath: str) -> str:
 class Transcriber:
     """Extract structured page text and remove repeated deck boilerplate."""
 
-    def __init__(self, pdf_path: str, cache_dir: str | None = None):
+    def __init__(self, pdf_path: str, cache_dir: str | None = None) -> None:
         """Initialize the transcriber for a PDF and optional isolated cache directory."""
         self.pdf_path = pdf_path
         pdf_name = os.path.splitext(os.path.basename(pdf_path))[0]
         self.cache_dir = cache_dir or os.path.join(CACHE_DIR, pdf_name)
 
-    def extract_page(self, page, slide_number: int) -> ExtractedPage:
+    def extract_page(self, page: Any, slide_number: int) -> ExtractedPage:
         """Extract text lines, font cues, positions, and image count from one page."""
         page_content = page.get_text("dict", sort=True)
         extracted_lines: list[ExtractedLine] = []
@@ -77,7 +84,14 @@ class Transcriber:
                 font_size = max((float(span.get("size", 0.0)) for span in spans), default=0.0)
                 is_bold = any(int(span.get("flags", 0)) & 16 for span in spans)
                 bbox = tuple(float(coordinate) for coordinate in line.get("bbox", (0.0, 0.0, 0.0, 0.0)))
-                extracted_line = ExtractedLine(line_text, block_number, bbox, font_size, is_bold, float(page.rect.height))
+                extracted_line = ExtractedLine(
+                    line_text,
+                    block_number,
+                    bbox,
+                    font_size,
+                    is_bold,
+                    float(page.rect.height)
+                )
                 extracted_lines.append(extracted_line)
 
         return ExtractedPage(slide_number, extracted_lines, image_count)
@@ -121,17 +135,27 @@ class Transcriber:
 
         return max(candidates, key=title_score)
 
-    def build_clean_text(self, page: ExtractedPage, boilerplate_keys: set[tuple[str, int, int]]) -> tuple[str, str | None]:
-        """Build readable slide text while keeping title and block boundaries."""
-        content_lines = []
+    def get_content_lines(
+        self,
+        page: ExtractedPage,
+        boilerplate_keys: set[tuple[str, int, int]]
+    ) -> list[ExtractedLine]:
+        """Remove repeated deck text and page numbers from one page."""
+        content_lines: list[ExtractedLine] = []
         for line in page.lines:
             if line.position_key() in boilerplate_keys:
                 continue
             if self.is_page_number(line):
                 continue
             content_lines.append(line)
+        return content_lines
 
-        title_line = self.choose_title(content_lines)
+    def group_body_blocks(
+        self,
+        content_lines: list[ExtractedLine],
+        title_line: ExtractedLine | None
+    ) -> list[str]:
+        """Group non-title lines by their original PDF text block."""
         block_texts: list[str] = []
         current_block_number: int | None = None
         current_block_lines: list[str] = []
@@ -147,13 +171,30 @@ class Transcriber:
 
         if current_block_lines:
             block_texts.append("\n".join(current_block_lines))
+        return block_texts
+
+    def build_clean_text(
+        self,
+        page: ExtractedPage,
+        boilerplate_keys: set[tuple[str, int, int]]
+    ) -> tuple[str, str | None]:
+        """Build readable slide text while keeping title and block boundaries."""
+        content_lines = self.get_content_lines(page, boilerplate_keys)
+        title_line = self.choose_title(content_lines)
+        block_texts = self.group_body_blocks(content_lines, title_line)
 
         title = title_line.text if title_line is not None else None
         text_parts = [title] if title else []
         text_parts.extend(block for block in block_texts if block)
         return "\n\n".join(text_parts).strip(), title
 
-    def write_page_artifacts(self, output_dir: str, page: ExtractedPage, text: str, title: str | None):
+    def write_page_artifacts(
+        self,
+        output_dir: str,
+        page: ExtractedPage,
+        text: str,
+        title: str | None
+    ) -> None:
         """Write human-readable text and structured JSON artifacts atomically."""
         filename_stem = f"slide_{page.slide_number:03d}"
         text_path = os.path.join(output_dir, f"{filename_stem}.txt")
@@ -176,6 +217,23 @@ class Transcriber:
             json.dump(payload, file_handle, indent=2, ensure_ascii=False)
         os.replace(json_temp_path, json_path)
 
+    def extract_all_pages(self, pdf_document: Any) -> list[ExtractedPage]:
+        """Extract every PDF page and assign one-based slide numbers."""
+        return [
+            self.extract_page(page, page_index + 1)
+            for page_index, page in enumerate(pdf_document)
+        ]
+
+    def remove_stale_artifacts(
+        self,
+        output_dir: str,
+        expected_filenames: set[str]
+    ) -> None:
+        """Remove slide artifacts left by an older version of the same PDF."""
+        for filename in os.listdir(output_dir):
+            if filename.startswith("slide_") and filename not in expected_filenames:
+                os.remove(os.path.join(output_dir, filename))
+
     def run(self) -> str:
         """Extract, clean, and persist every slide in the PDF."""
         import fitz
@@ -194,7 +252,7 @@ class Transcriber:
 
         pdf_document = fitz.open(self.pdf_path)
         try:
-            pages = [self.extract_page(page, page_index + 1) for page_index, page in enumerate(pdf_document)]
+            pages = self.extract_all_pages(pdf_document)
         finally:
             pdf_document.close()
 
@@ -207,9 +265,7 @@ class Transcriber:
             expected_filenames.add(f"slide_{page.slide_number:03d}.json")
             print(f"[{page.slide_number}/{len(pages)}] -> slide_{page.slide_number:03d}.txt")
 
-        for filename in os.listdir(output_dir):
-            if filename.startswith("slide_") and filename not in expected_filenames:
-                os.remove(os.path.join(output_dir, filename))
+        self.remove_stale_artifacts(output_dir, expected_filenames)
 
         print("=" * 60)
         print(f"[OK] {len(pages)} slides written to {output_dir}")

@@ -1,3 +1,9 @@
+"""Load model selections and local request budgets from the environment.
+
+The module defines model-family defaults, environment parsing helpers, active
+stage constants, and ``get_model_summary`` for configuration reporting.
+"""
+
 import os
 from dataclasses import dataclass
 
@@ -20,7 +26,12 @@ class ModelLimit:
 
 
 MODEL_LIMITS = (
-    ModelLimit("Groq GPT-OSS 20B", ("openai/gpt-oss-20b", "gpt-oss-20b"), 30, 1000),
+    ModelLimit(
+        "Groq GPT-OSS 20B",
+        ("openai/gpt-oss-20b", "gpt-oss-20b"),
+        30,
+        1000
+    ),
     ModelLimit("Gemini 3.1 Flash Lite", ("gemini-3.1-flash-lite",), 15, 500),
     ModelLimit("Gemini 3.5 Flash", ("gemini-3.5-flash",), 5, 20),
     ModelLimit("Gemini 3 Flash", ("gemini-3-flash",), 5, 20),
@@ -28,10 +39,30 @@ MODEL_LIMITS = (
     ModelLimit("Gemini 2.5 Flash", ("gemini-2.5-flash",), 5, 20),
     ModelLimit("Gemini 3.1 Pro", ("gemini-3.1-pro",), 0, 0),
     ModelLimit("Gemini 2.5 Pro", ("gemini-2.5-pro",), 0, 0),
-    ModelLimit("Gemini 2 Flash Lite", ("gemini-2.0-flash-lite", "gemini-2-flash-lite"), 0, 0),
-    ModelLimit("Gemini 2 Flash", ("gemini-2.0-flash", "gemini-2-flash"), 0, 0),
-    ModelLimit("Gemma 4 31B", ("gemma-4-31b", "gemma-4-31b-it"), 15, 1500),
-    ModelLimit("Gemma 4 26B", ("gemma-4-26b", "gemma-4-26b-it", "gemma-4-26b-a4b-it"), 15, 1500),
+    ModelLimit(
+        "Gemini 2 Flash Lite",
+        ("gemini-2.0-flash-lite", "gemini-2-flash-lite"),
+        0,
+        0
+    ),
+    ModelLimit(
+        "Gemini 2 Flash",
+        ("gemini-2.0-flash", "gemini-2-flash"),
+        0,
+        0
+    ),
+    ModelLimit(
+        "Gemma 4 31B",
+        ("gemma-4-31b", "gemma-4-31b-it"),
+        15,
+        1500
+    ),
+    ModelLimit(
+        "Gemma 4 26B",
+        ("gemma-4-26b", "gemma-4-26b-it", "gemma-4-26b-a4b-it"),
+        15,
+        1500
+    ),
     ModelLimit("Gemma", ("gemma",), 15, 1500)
 )
 
@@ -126,7 +157,17 @@ def get_model_summary() -> list[tuple[str, str, int, int]]:
         ("note_extractor", REWRITER_MODEL, REWRITER_MODEL_RPM, REWRITER_MODEL_RPD),
         ("math", MATH_MODEL, MATH_MODEL_RPM, MATH_MODEL_RPD),
         ("title", TITLE_MODEL, TITLE_MODEL_RPM, TITLE_MODEL_RPD),
-        ("quality_identifier", QUALITY_IDENTIFIER_MODEL, QUALITY_IDENTIFIER_MODEL_RPM, QUALITY_IDENTIFIER_MODEL_RPD),
-        ("quality_fixer", QUALITY_FIXER_MODEL, QUALITY_FIXER_MODEL_RPM, QUALITY_FIXER_MODEL_RPD),
+        (
+            "quality_identifier",
+            QUALITY_IDENTIFIER_MODEL,
+            QUALITY_IDENTIFIER_MODEL_RPM,
+            QUALITY_IDENTIFIER_MODEL_RPD
+        ),
+        (
+            "quality_fixer",
+            QUALITY_FIXER_MODEL,
+            QUALITY_FIXER_MODEL_RPM,
+            QUALITY_FIXER_MODEL_RPD
+        ),
         ("503_fallback", FALLBACK_MODEL, FALLBACK_MODEL_RPM, FALLBACK_MODEL_RPD)
     ]

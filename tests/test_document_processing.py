@@ -1,3 +1,9 @@
+"""Test PDF extraction, transformations, retries, and model configuration.
+
+The module contains ``DocumentProcessingTests`` and a small generated PDF deck
+used to exercise deterministic pipeline behavior without live model requests.
+"""
+
 import os
 import tempfile
 import time
@@ -9,15 +15,35 @@ import fitz
 from pydantic_ai.exceptions import ModelHTTPError
 
 from src.math_formatter import MathFormatter
-from src.models import HeadingAction, HeadingChange, IssueType, QualityIssue, QualityReport, SlideRewriteResponse, SlideType, TitleAnalysis
+from src.models import (
+    HeadingAction,
+    HeadingChange,
+    IssueType,
+    QualityIssue,
+    QualityReport,
+    SlideRewriteResponse,
+    SlideType,
+    TitleAnalysis
+)
 from src.pipeline import Pipeline
 from src.quality_checker import QualityChecker
 from src.rewriter import LLMRewriter
 from src.title_editor import TitleEditor
 from src.transcriber import Transcriber
-from src.utilities.model_config import DEFAULT_MODEL, FALLBACK_MODEL, FAST_NOTE_MODEL, get_default_model_limits, get_default_note_model
+from src.utilities.model_config import (
+    DEFAULT_MODEL,
+    FALLBACK_MODEL,
+    FAST_NOTE_MODEL,
+    get_default_model_limits,
+    get_default_note_model
+)
 from src.utilities.normalizer import normalize
-from src.utilities.model_retry import DEFAULT_REQUEST_TIMEOUT_SECONDS, get_agent_model_settings, get_cached_agent, run_with_retry
+from src.utilities.model_retry import (
+    DEFAULT_REQUEST_TIMEOUT_SECONDS,
+    get_agent_model_settings,
+    get_cached_agent,
+    run_with_retry
+)
 from src.utilities.rate_limit import RequestPacer
 
 
@@ -47,6 +73,15 @@ class DocumentProcessingTests(unittest.TestCase):
         document.close()
         return pdf_path
 
+    def create_test_pacer(self) -> RequestPacer:
+        """Create a pacer whose persistent state stays in the test directory."""
+        pacer = RequestPacer(60)
+        pacer.usage_path = str(self.temp_path / "usage.json")
+        pacer.recent_path = str(self.temp_path / "recent.json")
+        pacer.lock_path = str(self.temp_path / "rate.lock")
+        pacer.request_log_path = str(self.temp_path / "logs" / "requests.csv")
+        return pacer
+
     def test_transcriber_removes_positional_boilerplate(self):
         """Repeated headers and page numbers must not enter slide text."""
         pdf_path = self.create_test_pdf()
@@ -69,10 +104,26 @@ class DocumentProcessingTests(unittest.TestCase):
             for slide_number in range(1, 4)
         ]
 
-        with patch("src.pipeline.LLMRewriter.run_rewriter_request", side_effect=extracted_slides):
-            with patch("src.pipeline.TitleEditor.identify", return_value=TitleAnalysis(changes=[])):
-                with patch("src.pipeline.QualityChecker.check", return_value=QualityReport(issues=[])):
-                    document = Pipeline(str(pdf_path), cache_root=str(cache_root), progress_callback=lambda *event: progress_events.append(event)).run()
+        with (
+            patch(
+                "src.pipeline.LLMRewriter.run_rewriter_request",
+                side_effect=extracted_slides
+            ),
+            patch(
+                "src.pipeline.TitleEditor.identify",
+                return_value=TitleAnalysis(changes=[])
+            ),
+            patch(
+                "src.pipeline.QualityChecker.check",
+                return_value=QualityReport(issues=[])
+            )
+        ):
+            pipeline = Pipeline(
+                str(pdf_path),
+                cache_root=str(cache_root),
+                progress_callback=lambda *event: progress_events.append(event)
+            )
+            document = pipeline.run()
 
         self.assertIn("## Topic 1", document)
         self.assertIn("Body content 3", document)
@@ -133,11 +184,11 @@ class DocumentProcessingTests(unittest.TestCase):
         formatter = MathFormatter()
         self.assertFalse(formatter.has_math_candidate("A plain lecture sentence."))
         self.assertTrue(formatter.has_math_candidate("x = y + 2"))
+        self.assertTrue(formatter.has_math_candidate("The sum is ∑ x."))
 
     def test_rate_limiter_recovers_stale_lock(self):
         """An abandoned lock must not block future requests forever."""
-        pacer = RequestPacer(60)
-        pacer.lock_path = str(self.temp_path / "rate.lock")
+        pacer = self.create_test_pacer()
         Path(pacer.lock_path).write_text("stale", encoding="utf-8")
         stale_time = time.time() - 300
         os.utime(pacer.lock_path, (stale_time, stale_time))
@@ -146,9 +197,27 @@ class DocumentProcessingTests(unittest.TestCase):
         pacer.release_lock()
         self.assertFalse(Path(pacer.lock_path).exists())
 
+    def test_rate_limiter_reserves_and_persists_request(self):
+        """A successful reservation must update daily and recent usage."""
+        pacer = self.create_test_pacer()
+        pacer.acquire_request_slot(
+            "test-model",
+            rpm=10,
+            rpd=100,
+            request_name="test-request",
+            prompt="short prompt"
+        )
+
+        today_key = pacer.get_today_key()
+        usage = pacer.load_json_object(pacer.usage_path)
+        recent = pacer.load_json_object(pacer.recent_path)
+        self.assertEqual(usage[today_key]["test-model"], 1)
+        self.assertEqual(len(recent["test-model"]), 1)
+        self.assertTrue(Path(pacer.request_log_path).exists())
+
     def test_repeated_503_switches_to_fallback_model(self):
         """A final primary 503 must retry the request with the fallback model."""
-        pacer = RequestPacer(60)
+        pacer = self.create_test_pacer()
 
         def runner(model_name: str, prompt: str) -> str:
             """Provide the callable shape expected by retry orchestration."""

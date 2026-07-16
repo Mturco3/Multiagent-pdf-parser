@@ -1,3 +1,9 @@
+"""Test cache provenance, cache invalidation, and document assembly behavior.
+
+The module contains ``PipelineCacheSourceTests``, which uses temporary files to
+verify that cached artifacts remain tied to their exact source and settings.
+"""
+
 import tempfile
 import unittest
 from pathlib import Path

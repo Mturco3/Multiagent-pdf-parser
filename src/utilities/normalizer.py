@@ -1,3 +1,9 @@
+"""Repair extracted text and normalize slide blocks into readable Markdown.
+
+The module contains mojibake repair, bullet detection, raw-block heuristics,
+and ``normalize`` for merging wrapped PDF text while preserving lists.
+"""
+
 import re
 
 STANDARD_BULLET = "-"
@@ -53,10 +59,19 @@ def strip_bullet_prefix(text: str) -> str:
     return BULLET_PREFIX.sub("", text, count=1).strip()
 
 
+def get_non_empty_lines(text: str) -> list[str]:
+    """Return repaired, cleaned lines while discarding empty lines."""
+    cleaned_lines: list[str] = []
+    for line in repair_text(text).splitlines():
+        cleaned_line = clean_line(line)
+        if cleaned_line:
+            cleaned_lines.append(cleaned_line)
+    return cleaned_lines
+
+
 def looks_like_raw_slide_block(text: str) -> bool:
     """Detect OCR-style slide fragments with many short wrapped lines or bullet glyphs."""
-    repaired = repair_text(text)
-    lines = [clean_line(line) for line in repaired.splitlines() if clean_line(line)]
+    lines = get_non_empty_lines(text)
     if not lines:
         return False
 
@@ -77,13 +92,13 @@ def normalize(text: str) -> str:
     current_paragraph: list[str] = []
     current_bullets: list[str] = []
 
-    def flush_paragraph():
+    def flush_paragraph() -> None:
         """Append and clear the current paragraph buffer."""
         if current_paragraph:
             normalized_blocks.append(" ".join(current_paragraph))
             current_paragraph.clear()
 
-    def flush_bullets():
+    def flush_bullets() -> None:
         """Append and clear the current bullet buffer."""
         if current_bullets:
             normalized_blocks.extend(f"{STANDARD_BULLET} {item}" for item in current_bullets)
