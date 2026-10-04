@@ -1,6 +1,6 @@
 # University Notes Transcript Agent
 
-Converts PDF lecture slides into source-aware Markdown notes. The pipeline preserves PDF layout long enough to remove repeated deck chrome, infer titles, retain genuine lists, and minimize unnecessary model requests.
+This tool convertes PDF lecture slides into source-aware Markdown notes. The pipeline preserves PDF layout long enough to remove repeated deck chrome, infer titles, retain genuine lists, and minimize unnecessary model requests.
 
 ## Pipeline
 
