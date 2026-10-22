@@ -1,6 +1,6 @@
 # University Notes Transcript Agent
 
-This tool convertes PDF lecture slides into source-aware Markdown notes. The pipeline preserves PDF layout long enough to remove repeated deck chrome, infer titles, retain genuine lists, and minimize unnecessary model requests.
+This tool converts PDF lecture slides into source-aware Markdown notes. The pipeline preserves PDF layout long enough to remove repeated deck chrome, infer titles, retain genuine lists, and minimize unnecessary model requests.
 
 ## Pipeline
 
@@ -25,7 +25,10 @@ Create and activate a virtual environment, then install dependencies:
 
 ```sh
 python -m venv pdf_parser
+# Windows
 pdf_parser\Scripts\activate
+# macOS / Linux
+source pdf_parser/bin/activate
 pip install -r requirements.txt
 ```
 
@@ -36,10 +39,11 @@ pip install -r requirements-dev.txt
 python -m pytest
 ```
 
-Create a `.env` file containing the Google API key:
+Create a `.env` file containing the Google API key (and optionally a Groq key):
 
 ```env
 GOOGLE_API_KEY=your_google_api_key
+GROQ_API_KEY=your_groq_api_key
 ```
 
 ## Usage
@@ -87,4 +91,4 @@ The rewriter is the direct per-slide note extractor; there is no separate per-sl
 
 ## Output and privacy
 
-CLI output is stored under `cache/<pdf-name>-<content-hash>/`. The Streamlit interface uses an isolated temporary cache and deletes uploaded PDF files after processing. PDF content is sent to the configured Google model during LLM stages.
+CLI output is stored under `cache/<pdf-name>-<content-hash>/`. The Streamlit interface uses an isolated temporary cache and deletes uploaded PDF files after processing. PDF content is sent to the configured model providers (Google, and Groq when `GROQ_API_KEY` is set) during LLM stages.
